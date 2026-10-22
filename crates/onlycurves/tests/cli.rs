@@ -100,13 +100,30 @@ impl FakeSysfs {
 
     /// `onlycurves --hwmon-root <fake> <args…>`
     fn onlycurves(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(assert_cmd::cargo_bin!("onlycurves"));
+        let mut command = onlycurves_bin();
         command
             .arg("--hwmon-root")
             .arg(self.hwmon_root())
             .args(args);
         command
     }
+
+    /// `onlycurves --hwmon-root <fake> --config <config> --state-dir <state_dir> <command>`
+    fn onlycurves_with(&self, config: &Path, state_dir: &Path, command: &str) -> Command {
+        let mut onlycurves = self.onlycurves(&[]);
+        onlycurves
+            .arg("--config")
+            .arg(config)
+            .arg("--state-dir")
+            .arg(state_dir)
+            .arg(command);
+        onlycurves
+    }
+}
+
+/// The binary under test.
+fn onlycurves_bin() -> Command {
+    Command::new(assert_cmd::cargo_bin!("onlycurves"))
 }
 
 /// The example config shipped in the repository.
@@ -121,7 +138,7 @@ fn write_attribute(dir: &Path, file: &str, value: &str) {
 
 #[test]
 fn help_lists_the_status_command() {
-    Command::new(assert_cmd::cargo_bin!("onlycurves"))
+    onlycurves_bin()
         .arg("--help")
         .assert()
         .success()
@@ -130,7 +147,7 @@ fn help_lists_the_status_command() {
 
 #[test]
 fn version_prints_the_crate_version() {
-    Command::new(assert_cmd::cargo_bin!("onlycurves"))
+    onlycurves_bin()
         .arg("--version")
         .assert()
         .success()
@@ -208,7 +225,7 @@ fn status_path_needs_a_chip() {
 
 #[test]
 fn status_reports_a_missing_hwmon_root() {
-    Command::new(assert_cmd::cargo_bin!("onlycurves"))
+    onlycurves_bin()
         .args(["--hwmon-root", "/nonexistent/hwmon", "status"])
         .assert()
         .failure()
@@ -313,8 +330,7 @@ fn identify_runs_the_fan_and_restores_its_output() {
             "No tachometer rose by 200 rpm or more.",
         ));
 
-    let pwm2 = sysfs.hwmon_root().join("hwmon7/pwm2");
-    assert_eq!(fs::read_to_string(pwm2).unwrap().trim(), "120");
+    assert_eq!(nct6798_attribute(&sysfs, "pwm2"), "120");
 }
 
 #[test]
@@ -376,13 +392,7 @@ fn run_drives_the_fans_and_hands_them_back_on_sigterm() {
     let state_file = state_dir.path().join("state.json");
 
     let child = sysfs
-        .onlycurves(&[
-            "--config",
-            config.to_str().unwrap(),
-            "--state-dir",
-            state_dir.path().to_str().unwrap(),
-            "run",
-        ])
+        .onlycurves_with(&config, state_dir.path(), "run")
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
@@ -402,11 +412,7 @@ fn run_drives_the_fans_and_hands_them_back_on_sigterm() {
     let record = fs::read_to_string(state_dir.path().join("outputs")).unwrap();
     assert_eq!(record.lines().count(), 2, "{record}");
 
-    let terminated = Command::new("kill")
-        .args(["-TERM", &child.id().to_string()])
-        .status()
-        .unwrap();
-    assert!(terminated.success());
+    signal(&child, "TERM");
     let output = child.wait_with_output().unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
 
@@ -432,13 +438,7 @@ fn run_refuses_a_state_directory_on_disk_before_touching_fans() {
     let on_disk = Path::new("/");
 
     sysfs
-        .onlycurves(&[
-            "--config",
-            config.to_str().unwrap(),
-            "--state-dir",
-            on_disk.to_str().unwrap(),
-            "run",
-        ])
+        .onlycurves_with(&config, on_disk, "run")
         .assert()
         .failure()
         .stderr(predicate::str::contains("not tmpfs"));
@@ -453,13 +453,7 @@ fn restore_hands_every_configured_fan_back_to_the_chip() {
     let state_dir = tempfile::tempdir().unwrap();
 
     sysfs
-        .onlycurves(&[
-            "--config",
-            config.to_str().unwrap(),
-            "--state-dir",
-            state_dir.path().to_str().unwrap(),
-            "restore",
-        ])
+        .onlycurves_with(&config, state_dir.path(), "restore")
         .assert()
         .success()
         .stdout(predicate::str::contains(
@@ -480,13 +474,7 @@ fn restore_ignores_broken_sensors() {
     let state_dir = tempfile::tempdir().unwrap();
 
     sysfs
-        .onlycurves(&[
-            "--config",
-            config.to_str().unwrap(),
-            "--state-dir",
-            state_dir.path().to_str().unwrap(),
-            "restore",
-        ])
+        .onlycurves_with(&config, state_dir.path(), "restore")
         .assert()
         .success();
     assert_eq!(nct6798_attribute(&sysfs, "pwm2_enable"), "5");
@@ -505,13 +493,7 @@ fn restore_uses_the_record_when_the_config_is_broken() {
     .unwrap();
 
     sysfs
-        .onlycurves(&[
-            "--config",
-            config.to_str().unwrap(),
-            "--state-dir",
-            state_dir.path().to_str().unwrap(),
-            "restore",
-        ])
+        .onlycurves_with(&config, state_dir.path(), "restore")
         .assert()
         .success()
         .stdout(predicate::str::contains(
@@ -536,13 +518,7 @@ fn restore_fails_without_record_or_config() {
     let state_dir = tempfile::tempdir().unwrap();
 
     sysfs
-        .onlycurves(&[
-            "--config",
-            config.to_str().unwrap(),
-            "--state-dir",
-            state_dir.path().to_str().unwrap(),
-            "restore",
-        ])
+        .onlycurves_with(&config, state_dir.path(), "restore")
         .assert()
         .failure();
 }
@@ -601,13 +577,7 @@ fn run_talks_to_systemd_and_reloads_on_sighup() {
     let systemd = FakeSystemd::new();
 
     let child = sysfs
-        .onlycurves(&[
-            "--config",
-            config.to_str().unwrap(),
-            "--state-dir",
-            state_dir.path().to_str().unwrap(),
-            "run",
-        ])
+        .onlycurves_with(&config, state_dir.path(), "run")
         .env("NOTIFY_SOCKET", &systemd.path)
         .env("WATCHDOG_USEC", "10000000")
         .stderr(std::process::Stdio::piped())
