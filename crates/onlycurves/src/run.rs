@@ -41,6 +41,13 @@ const STALL_TICKS: u32 = 5;
 /// daemon; an output that stays broken should.
 const MAX_OUTPUT_ERRORS: u32 = 10;
 
+/// Shown in systemd's status until a reload succeeds.
+const RELOAD_FAILED: &str = "reload failed, still running the previous config; see the journal";
+
+/// How often the loop pets systemd's watchdog while waiting for the next
+/// tick. Well under the unit's `WatchdogSec=10s`.
+const WATCHDOG_PET: Duration = Duration::from_secs(1);
+
 /// How often a sleeping loop checks for signals.
 const SIGNAL_CHECK: Duration = Duration::from_millis(100);
 
@@ -77,6 +84,7 @@ pub fn run(paths: &Paths, signals: &DaemonSignals, notifier: &Notifier) -> anyho
         record,
         notifier,
         state_write_failed: false,
+        status_note: None,
     };
     daemon.log_start();
 
@@ -96,6 +104,8 @@ struct Daemon<'a> {
     record: OutputRecord,
     notifier: &'a Notifier,
     state_write_failed: bool,
+    /// Appended to systemd's status line, e.g. after a failed reload.
+    status_note: Option<&'static str>,
 }
 
 /// What ended a wait between ticks.
@@ -128,7 +138,7 @@ impl Daemon<'_> {
             }
 
             next += self.setup.config.interval;
-            match wait_until(next, signals) {
+            match wait_until(next, signals, self.notifier) {
                 Wake::Tick => {}
                 Wake::Stop => {
                     log::info("stopping");
@@ -151,7 +161,10 @@ impl Daemon<'_> {
     fn tick_and_publish(&mut self) -> anyhow::Result<String> {
         let snapshot = tick(&self.setup.bindings, &mut self.fans)?;
         write_state(&self.state_file, &snapshot, &mut self.state_write_failed);
-        let status = status_line(&snapshot);
+        let mut status = status_line(&snapshot);
+        if let Some(note) = self.status_note {
+            status = format!("{status} | {note}");
+        }
         self.notifier.tick(&status);
         Ok(status)
     }
@@ -163,16 +176,23 @@ impl Daemon<'_> {
         let outcome = Setup::load(self.paths.config, self.paths.hwmon_root)
             .and_then(|setup| self.switch_to(setup));
         match outcome {
-            Ok(()) => log::info(format!(
-                "reloaded {}; controlling {}",
-                self.paths.config.display(),
-                fan_names(&self.fans)
-            )),
-            Err(error) => log::error(format!(
-                "reload failed, keeping the running config: {error:#}"
-            )),
+            Ok(()) => {
+                log::info(format!(
+                    "reloaded {}; controlling {}",
+                    self.paths.config.display(),
+                    fan_names(&self.fans)
+                ));
+                self.status_note = None;
+                self.notifier.ready("reloaded");
+            }
+            Err(error) => {
+                log::error(format!(
+                    "reload failed, keeping the running config: {error:#}"
+                ));
+                self.status_note = Some(RELOAD_FAILED);
+                self.notifier.ready(RELOAD_FAILED);
+            }
         }
-        self.notifier.ready("reloaded");
     }
 
     /// Switches to `setup`. New outputs are taken over first, so if that fails
@@ -604,9 +624,15 @@ fn write_state(state_file: &StateFile, snapshot: &Snapshot, failed: &mut bool) {
 }
 
 /// Sleeps until `deadline`, waking early for a stop or reload signal. A
-/// reload request is consumed.
-fn wait_until(deadline: Instant, signals: &DaemonSignals) -> Wake {
+/// reload request is consumed. Pets the watchdog every [`WATCHDOG_PET`]
+/// meanwhile, so a long `interval` cannot trip it; a hung tick still does.
+fn wait_until(deadline: Instant, signals: &DaemonSignals, notifier: &Notifier) -> Wake {
+    let mut last_pet = Instant::now();
     loop {
+        if last_pet.elapsed() >= WATCHDOG_PET {
+            notifier.watchdog();
+            last_pet = Instant::now();
+        }
         if signals.stop.load(Ordering::Relaxed) {
             return Wake::Stop;
         }
@@ -784,16 +810,17 @@ curve   = [[40, 40], [60, 60]]
         let signals = DaemonSignals::unregistered();
 
         signals.reload.store(true, Ordering::Relaxed);
-        assert_eq!(wait_until(far, &signals), Wake::Reload);
+        let notifier = Notifier::disabled();
+        assert_eq!(wait_until(far, &signals, &notifier), Wake::Reload);
         assert!(
             !signals.reload.load(Ordering::Relaxed),
             "the request is consumed"
         );
 
-        assert_eq!(wait_until(Instant::now(), &signals), Wake::Tick);
+        assert_eq!(wait_until(Instant::now(), &signals, &notifier), Wake::Tick);
 
         signals.stop.store(true, Ordering::Relaxed);
-        assert_eq!(wait_until(far, &signals), Wake::Stop);
+        assert_eq!(wait_until(far, &signals, &notifier), Wake::Stop);
     }
 
     /// Runs `test` on a daemon for the fake PC's `CONFIG`, after one tick.
@@ -816,6 +843,7 @@ curve   = [[40, 40], [60, 60]]
             record: OutputRecord::in_dir(shm.path()),
             notifier: &notifier,
             state_write_failed: false,
+            status_note: None,
         };
         daemon.tick_and_publish().unwrap();
         test(&sysfs, &mut daemon);
@@ -885,6 +913,7 @@ curve   = [[40, 40], [60, 60]]
 
             assert_eq!(fan_names(&daemon.fans), "cpu_cooler");
             assert_eq!(attribute(sysfs, "pwm2_enable"), "1");
+            assert_eq!(daemon.status_note, Some(RELOAD_FAILED));
         });
     }
 

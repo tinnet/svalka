@@ -60,6 +60,13 @@ impl Notifier {
         }
     }
 
+    /// Pets the watchdog without a status update, between ticks.
+    pub fn watchdog(&self) {
+        if self.watchdog {
+            self.send("WATCHDOG=1");
+        }
+    }
+
     /// A reload starts. systemd needs the monotonic time with it.
     pub fn reloading(&self) {
         self.send(&format!(
@@ -159,6 +166,18 @@ mod tests {
         let (_dir, listener, notifier) = systemd(false);
         notifier.tick("cpu_cooler 47 %");
         assert_eq!(receive(&listener), "STATUS=cpu_cooler 47 %");
+    }
+
+    #[test]
+    fn watchdog_pets_only_when_systemd_asked_for_it() {
+        let (_dir, listener, notifier) = systemd(true);
+        notifier.watchdog();
+        assert_eq!(receive(&listener), "WATCHDOG=1");
+
+        let (_dir, listener, notifier) = systemd(false);
+        listener.set_nonblocking(true).unwrap();
+        notifier.watchdog();
+        assert!(listener.recv(&mut [0; 16]).is_err(), "nothing was sent");
     }
 
     #[test]
