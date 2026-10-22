@@ -25,6 +25,8 @@ pub enum Failsafe {
     Unreadable { source: String },
     /// The source changed by more than [`MAX_JUMP_CELSIUS`] since the last tick.
     Jump { source: String, from: f64, to: f64 },
+    /// The fan has no sources. Config validation prevents this.
+    NoSources,
 }
 
 impl fmt::Display for Failsafe {
@@ -35,6 +37,7 @@ impl fmt::Display for Failsafe {
                 f,
                 "sensor {source} jumped from {from:.1} °C to {to:.1} °C in one tick"
             ),
+            Self::NoSources => write!(f, "the fan has no sources"),
         }
     }
 }
@@ -95,7 +98,13 @@ impl FanController {
             Ok(readings) => readings,
             Err(failsafe) => return self.failsafe_tick(failsafe),
         };
-        let (source, celsius) = hottest(readings);
+        let readings = readings
+            .iter()
+            .map(|(source, celsius)| (source.as_str(), *celsius));
+        let Some((source, celsius)) = hottest(readings) else {
+            return self.failsafe_tick(Failsafe::NoSources);
+        };
+        let source = source.to_owned();
         let smoothed = self.smooth(celsius);
         let effective = self.apply_hysteresis(smoothed);
         Tick {
@@ -174,13 +183,10 @@ impl FanController {
     }
 }
 
-/// The hottest reading. `readings` is never empty: config validation requires
-/// at least one source.
-fn hottest(readings: Vec<(String, f64)>) -> (String, f64) {
-    readings
-        .into_iter()
-        .max_by(|a, b| a.1.total_cmp(&b.1))
-        .unwrap_or_else(|| (String::new(), f64::NAN))
+/// The hottest of `(source, °C)` readings, or `None` when there are none.
+/// The rule every fan follows: several sources, the hottest one wins.
+pub fn hottest<'a>(readings: impl IntoIterator<Item = (&'a str, f64)>) -> Option<(&'a str, f64)> {
+    readings.into_iter().max_by(|a, b| a.1.total_cmp(&b.1))
 }
 
 /// alpha = interval / smoothing, capped at 1. No smoothing means alpha = 1:
@@ -316,6 +322,12 @@ hysteresis = 2.0
         let failsafe = fan.tick(&readings(None, Some(0.0)));
 
         assert_close(failsafe.smoothed, 50.0);
+    }
+
+    #[test]
+    fn hottest_picks_the_highest_reading() {
+        assert_eq!(hottest([("cpu", 49.0), ("gpu", 63.5)]), Some(("gpu", 63.5)));
+        assert_eq!(hottest([]), None);
     }
 
     #[test]

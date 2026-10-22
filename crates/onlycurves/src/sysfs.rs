@@ -9,11 +9,20 @@ use std::path::Path;
 use std::str::FromStr;
 
 /// Reads an attribute file and returns its contents without surrounding whitespace.
+///
+/// # Errors
+///
+/// Fails when the file cannot be read.
 pub fn read_string(path: &Path) -> io::Result<String> {
     Ok(fs::read_to_string(path)?.trim().to_owned())
 }
 
 /// Reads an attribute file and parses it as a number (or any other `FromStr` type).
+///
+/// # Errors
+///
+/// Fails when the file cannot be read, or with `InvalidData` when its
+/// contents do not parse.
 pub fn read_value<T: FromStr>(path: &Path) -> io::Result<T> {
     let text = read_string(path)?;
     text.parse().map_err(|_| {
@@ -25,6 +34,11 @@ pub fn read_value<T: FromStr>(path: &Path) -> io::Result<T> {
 }
 
 /// Writes one value to an attribute file.
+///
+/// # Errors
+///
+/// Fails when the write is refused, e.g. without root or for a value the
+/// driver rejects.
 pub fn write_value(path: &Path, value: impl std::fmt::Display) -> io::Result<()> {
     fs::write(path, value.to_string())
 }

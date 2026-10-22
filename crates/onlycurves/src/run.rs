@@ -298,17 +298,7 @@ fn take_over_fans(setup: &Setup) -> anyhow::Result<Vec<FanLoop>> {
 /// Switches `output` to manual, to be handed back to the chip's automatic mode.
 fn take_over(output: &BoundOutput) -> anyhow::Result<ManualOverride> {
     let mode = firmware_mode(output)?;
-    let manual = ManualOverride::take(output.chip(), output.pwm(), HandBack::Automatic(mode))
-        .map_err(|error| {
-            if error.kind() == std::io::ErrorKind::PermissionDenied {
-                anyhow!(
-                    "writing {} needs root; run this with sudo",
-                    output.describe()
-                )
-            } else {
-                anyhow!(error).context(format!("cannot take over {}", output.describe()))
-            }
-        })?;
+    let manual = output.take_over(HandBack::Automatic(mode))?;
     log::info(format!(
         "took over {} (was {}); it returns to the chip's own curve on exit",
         output.describe(),
@@ -447,17 +437,16 @@ impl FanLoop {
     /// Writes `raw` if it differs from what we wrote last, first taking the
     /// output back if something else changed it. Returns `pwmN_enable` as read.
     fn write_duty(&mut self, raw: u8) -> anyhow::Result<Option<u8>> {
-        let label = format!("{}: {}", self.name, self.output.describe());
         let current = self
             .manual
             .current()
-            .with_context(|| format!("cannot read {label}"))?;
+            .with_context(|| format!("cannot read {}", self.label()))?;
 
         if self.output_errors > 0 {
             // After a failed tick we do not know what the output holds.
             self.manual
                 .reassert(raw)
-                .with_context(|| format!("cannot take back {label}"))?;
+                .with_context(|| format!("cannot take back {}", self.label()))?;
             self.written = Some(raw);
             return Ok(current.enable);
         }
@@ -467,7 +456,7 @@ impl FanLoop {
             self.report_interference(&format!("{current}"));
             self.manual
                 .reassert(raw)
-                .with_context(|| format!("cannot take back {label}"))?;
+                .with_context(|| format!("cannot take back {}", self.label()))?;
             self.written = Some(raw);
             return Ok(current.enable);
         }
@@ -482,10 +471,15 @@ impl FanLoop {
         if self.written != Some(raw) {
             self.manual
                 .set(raw)
-                .with_context(|| format!("cannot write {label}"))?;
+                .with_context(|| format!("cannot write {}", self.label()))?;
             self.written = Some(raw);
         }
         Ok(current.enable)
+    }
+
+    /// E.g. `cpu_cooler: nct6798 pwm2`, for error messages.
+    fn label(&self) -> String {
+        format!("{}: {}", self.name, self.output.describe())
     }
 
     /// Counts a tick in which the output could not be read or written. The

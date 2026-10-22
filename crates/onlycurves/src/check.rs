@@ -6,6 +6,7 @@ use std::path::Path;
 
 use anyhow::{Context, anyhow};
 use onlycurves_core::config::Config;
+use onlycurves_core::controller::hottest;
 use onlycurves_core::pwm;
 
 use crate::binding::Bindings;
@@ -81,8 +82,12 @@ pub fn read_report(config: &Config, bindings: &Bindings) -> anyhow::Result<Repor
     for (name, fan) in &config.fans {
         // `bind` succeeded, so every fan has an output.
         let output = &bindings.outputs[name];
-        let (source, celsius) = hottest(&fan.sources, &temperatures)
-            .ok_or_else(|| anyhow!("fan {name} has no readable sources"))?;
+        let readings = fan
+            .sources
+            .iter()
+            .filter_map(|source| Some((source.as_str(), *temperatures.get(source.as_str())?)));
+        let (source, celsius) =
+            hottest(readings).ok_or_else(|| anyhow!("fan {name} has no readable sources"))?;
         fans.push(FanReading {
             name: name.clone(),
             output: output.describe(),
@@ -95,17 +100,6 @@ pub fn read_report(config: &Config, bindings: &Bindings) -> anyhow::Result<Repor
         });
     }
     Ok(Report { sensors, fans })
-}
-
-/// The hottest of `sources` and its temperature.
-fn hottest<'a>(
-    sources: &'a [String],
-    temperatures: &BTreeMap<&str, f64>,
-) -> Option<(&'a str, f64)> {
-    sources
-        .iter()
-        .filter_map(|source| Some((source.as_str(), *temperatures.get(source.as_str())?)))
-        .max_by(|a, b| a.1.total_cmp(&b.1))
 }
 
 /// Renders the report under a line saying the config is valid.
@@ -230,14 +224,6 @@ Fans, at the current temperatures (no smoothing or hysteresis)
             render(Path::new("/etc/onlycurves.toml"), &report()),
             expected
         );
-    }
-
-    #[test]
-    fn hottest_source_wins() {
-        let sources = vec!["cpu".to_owned(), "gpu".to_owned()];
-        let temperatures = BTreeMap::from([("cpu", 49.0), ("gpu", 63.5)]);
-
-        assert_eq!(hottest(&sources, &temperatures), Some(("gpu", 63.5)));
     }
 
     #[test]

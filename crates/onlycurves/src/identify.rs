@@ -115,21 +115,10 @@ fn find_output<'a>(setup: &'a Setup, fan: &str) -> anyhow::Result<&'a BoundOutpu
     })
 }
 
-/// Switches the output to manual at full duty, explaining a permission error.
+/// Switches the output to manual at full duty.
 fn take_over(output: &BoundOutput) -> anyhow::Result<ManualOverride> {
-    let needs_root = |error: io::Error| {
-        if error.kind() == io::ErrorKind::PermissionDenied {
-            anyhow!(
-                "writing {} needs root; run this with sudo",
-                output.describe()
-            )
-        } else {
-            anyhow!(error).context(format!("cannot take over {}", output.describe()))
-        }
-    };
-    let manual =
-        ManualOverride::take(output.chip(), output.pwm(), HandBack::Saved).map_err(needs_root)?;
-    manual.set(FULL).map_err(needs_root)?;
+    let manual = output.take_over(HandBack::Saved)?;
+    output.set(&manual, FULL)?;
     Ok(manual)
 }
 

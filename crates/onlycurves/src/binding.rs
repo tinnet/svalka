@@ -10,7 +10,7 @@ use std::io;
 
 use onlycurves_core::config::{Config, OutputRef, SensorRef};
 
-use crate::hwmon::{self, Chip};
+use crate::hwmon::{self, Chip, HandBack, ManualOverride};
 
 /// Labels of inputs that are often unconnected on consumer boards and then
 /// report garbage, such as AUXTIN0 at 84 °C on the B550-I.
@@ -78,6 +78,34 @@ impl BoundOutput {
     #[must_use]
     pub fn same_output(&self, other: &BoundOutput) -> bool {
         self.chip.dir() == other.chip.dir() && self.pwm == other.pwm
+    }
+
+    /// Takes the output into manual mode (see [`ManualOverride`]), explaining
+    /// a permission error as the need for root.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the output cannot be read or switched to manual.
+    pub fn take_over(&self, hand_back: HandBack) -> anyhow::Result<ManualOverride> {
+        ManualOverride::take(&self.chip, self.pwm, hand_back).map_err(|error| self.explain(error))
+    }
+
+    /// Sets a raw duty through `manual`, explaining a permission error as the
+    /// need for root.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the write is refused.
+    pub fn set(&self, manual: &ManualOverride, raw: u8) -> anyhow::Result<()> {
+        manual.set(raw).map_err(|error| self.explain(error))
+    }
+
+    fn explain(&self, error: io::Error) -> anyhow::Error {
+        if error.kind() == io::ErrorKind::PermissionDenied {
+            anyhow::anyhow!("writing {} needs root; run this with sudo", self.describe())
+        } else {
+            anyhow::Error::new(error).context(format!("cannot take over {}", self.describe()))
+        }
     }
 
     /// The chip the output belongs to.
