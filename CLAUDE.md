@@ -8,11 +8,10 @@ and milestones; the README says which milestone is done.
 
 ## Commands
 
-- Toolchain comes from mise (`rust` pinned in `mise.toml`). If `mise exec` or
-  `mise run` tries to install a missing tool and fails, use
-  `eval "$(mise env)"` and call `cargo` directly.
-- `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`,
-  `cargo fmt --all --check` must all pass before a commit.
+- Toolchain comes from mise (`rust` pinned in `mise.toml`); run tasks with
+  `mise run <task>`.
+- `mise run test` and `mise run lint` must pass before a commit. The hk
+  pre-commit hook (`hk install`) formats and runs betterleaks on staged changes.
 
 ## Conventions
 

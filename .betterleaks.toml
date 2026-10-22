@@ -1,0 +1,8 @@
+# Default rules, but skip build output: cargo's target/ is gitignored and
+# build-script logs (e.g. libz-sys) trip the generic-api-key rule.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Build artifacts"
+paths = ['''(^|/)target/''']
