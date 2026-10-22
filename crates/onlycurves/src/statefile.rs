@@ -170,8 +170,9 @@ mod tests {
 
     #[test]
     fn prepare_refuses_a_disk() {
-        let on_disk = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let error = StateFile::prepare(&on_disk).unwrap_err();
+        // The root filesystem is a disk on any real system; a checkout may not be.
+        let on_disk = Path::new("/");
+        let error = StateFile::prepare(on_disk).unwrap_err();
 
         assert!(error.to_string().contains("not tmpfs"), "{error}");
     }

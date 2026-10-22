@@ -416,7 +416,8 @@ fn run_drives_the_fans_and_hands_them_back_on_sigterm() {
 fn run_refuses_a_state_directory_on_disk_before_touching_fans() {
     let sysfs = FakeSysfs::this_pc();
     let config = sysfs.config(&example_config());
-    let on_disk = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    // The root filesystem is a disk on any real system; a checkout may not be.
+    let on_disk = Path::new("/");
 
     sysfs
         .onlycurves(&[
