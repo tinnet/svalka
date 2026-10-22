@@ -7,6 +7,8 @@ use std::fmt;
 use std::fs;
 use std::io;
 
+use onlycurves_core::pwm;
+
 use super::Chip;
 use crate::sysfs;
 
@@ -39,7 +41,7 @@ pub struct Pwm {
 impl Pwm {
     /// The duty as a percentage, rounded to the nearest whole percent.
     pub fn duty_percent(&self) -> Option<u8> {
-        self.duty.map(raw_duty_to_percent)
+        self.duty.map(pwm::raw_to_percent)
     }
 }
 
@@ -198,11 +200,6 @@ impl Chip {
 #[allow(clippy::cast_precision_loss)] // sensor values are far below 2^52
 fn millidegrees_to_celsius(millidegrees: i64) -> f64 {
     millidegrees as f64 / 1000.0
-}
-
-fn raw_duty_to_percent(raw: u8) -> u8 {
-    let percent = (u32::from(raw) * 100 + 127) / 255;
-    u8::try_from(percent).expect("0–255 scales to at most 100")
 }
 
 #[cfg(test)]

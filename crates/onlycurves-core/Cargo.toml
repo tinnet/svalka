@@ -1,0 +1,15 @@
+[package]
+name = "onlycurves-core"
+description = "Config, curves and PWM scale for onlycurves; no hardware access"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.8"
+
+[lints]
+workspace = true

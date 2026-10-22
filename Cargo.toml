@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/onlycurves"]
+members = ["crates/onlycurves", "crates/onlycurves-core"]
 
 [workspace.package]
 version = "0.1.0"
