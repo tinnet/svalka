@@ -1,13 +1,13 @@
 [workspace]
 resolver = "3"
-members = ["crates/onlycurves", "crates/onlycurves-core"]
+members = ["crates/svalka", "crates/svalka-core"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.99"
 license = "MIT"
-repository = "https://github.com/tinnet/onlycurves"
+repository = "https://github.com/tinnet/svalka"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

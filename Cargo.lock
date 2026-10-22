@@ -629,30 +629,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
-name = "onlycurves"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "assert_cmd",
- "clap",
- "onlycurves-core",
- "predicates",
- "rustix",
- "shadow-rs",
- "signal-hook",
- "tempfile",
-]
-
-[[package]]
-name = "onlycurves-core"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "toml",
-]
-
-[[package]]
 name = "percent-encoding"
 version = "2.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -901,6 +877,30 @@ name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
+
+[[package]]
+name = "svalka"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "assert_cmd",
+ "clap",
+ "predicates",
+ "rustix",
+ "shadow-rs",
+ "signal-hook",
+ "svalka-core",
+ "tempfile",
+]
+
+[[package]]
+name = "svalka-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "toml",
+]
 
 [[package]]
 name = "syn"

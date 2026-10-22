@@ -1,4 +1,4 @@
-//! The config file, `/etc/onlycurves.toml`.
+//! The config file, `/etc/svalka.toml`.
 //!
 //! Parsing happens in two steps. Serde reads the text into `…File` structs that
 //! mirror the TOML exactly (unknown keys are errors, so typos fail loudly).

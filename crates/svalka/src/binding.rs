@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::io;
 
-use onlycurves_core::config::{Config, OutputRef, SensorRef};
+use svalka_core::config::{Config, OutputRef, SensorRef};
 
 use anyhow::Context;
 
@@ -97,11 +97,11 @@ impl BoundOutput {
     ///
     /// # Errors
     ///
-    /// Fails for chips whose automatic mode onlycurves does not know.
+    /// Fails for chips whose automatic mode svalka does not know.
     pub fn automatic_mode(&self) -> anyhow::Result<PwmEnable> {
         self.chip.automatic_mode().ok_or_else(|| {
             anyhow::anyhow!(
-                "{}: onlycurves does not know this chip's automatic mode, so it could not \
+                "{}: svalka does not know this chip's automatic mode, so it could not \
                  hand the fan back; only chips under the nct6775 driver are supported",
                 self.describe()
             )

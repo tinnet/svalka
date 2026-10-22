@@ -2,7 +2,7 @@
 
 ## Project
 
-onlycurves: a fan-control daemon + CLI for Linux, in Rust. The README
+svalka: a fan-control daemon + CLI for Linux, in Rust. The README
 describes what it does and for which hardware.
 
 ## Commands

@@ -2,14 +2,14 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
-use onlycurves::{check, identify, notify, restore, run, signals, status};
 use shadow_rs::shadow;
+use svalka::{check, identify, notify, restore, run, signals, status};
 
 shadow!(build);
 
 #[derive(Parser)]
-#[command(name = "onlycurves")]
-#[command(about = "Fan control for one PC: temperatures in, PWM out", long_about = None)]
+#[command(name = "svalka")]
+#[command(about = "Fan control for Linux: temperatures in, PWM out", long_about = None)]
 #[command(version = build::CLAP_LONG_VERSION)]
 struct Cli {
     /// Where hwmon chips are listed. Only tests point this elsewhere.
@@ -17,11 +17,11 @@ struct Cli {
     hwmon_root: PathBuf,
 
     /// Config file
-    #[arg(long, global = true, default_value = "/etc/onlycurves.toml")]
+    #[arg(long, global = true, default_value = "/etc/svalka.toml")]
     config: PathBuf,
 
     /// Where `run` writes state.json; must be on tmpfs. Only tests change it.
-    #[arg(long, global = true, hide = true, default_value = "/run/onlycurves")]
+    #[arg(long, global = true, hide = true, default_value = "/run/svalka")]
     state_dir: PathBuf,
 
     #[command(subcommand)]

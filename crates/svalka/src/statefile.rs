@@ -1,4 +1,4 @@
-//! Writing the state snapshot to `/run/onlycurves/state.json`.
+//! Writing the state snapshot to `/run/svalka/state.json`.
 //!
 //! The daemon rewrites the file every tick, so it must live on tmpfs (RAM),
 //! never on the SSD. Each write replaces the file atomically, so a reader
@@ -9,7 +9,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
-use onlycurves_core::state::Snapshot;
+use svalka_core::state::Snapshot;
 
 use crate::files;
 
@@ -131,8 +131,8 @@ mod tests {
     fn the_longest_matching_mount_point_wins() {
         let fs_type = |path: &str| filesystem_type(MOUNTINFO, Path::new(path));
 
-        assert_eq!(fs_type("/run/onlycurves").as_deref(), Some("tmpfs"));
-        assert_eq!(fs_type("/var/lib/onlycurves").as_deref(), Some("btrfs"));
+        assert_eq!(fs_type("/run/svalka").as_deref(), Some("tmpfs"));
+        assert_eq!(fs_type("/var/lib/svalka").as_deref(), Some("btrfs"));
         assert_eq!(fs_type("/mnt/my disk/x").as_deref(), Some("ext4"));
     }
 
@@ -148,7 +148,7 @@ mod tests {
     #[test]
     fn prepare_accepts_tmpfs_and_writes_atomically() {
         let shm = tempfile::tempdir_in("/dev/shm").unwrap();
-        let state = StateFile::prepare(&shm.path().join("onlycurves")).unwrap();
+        let state = StateFile::prepare(&shm.path().join("svalka")).unwrap();
         let snapshot = Snapshot {
             version: 1,
             unix_millis: 0,

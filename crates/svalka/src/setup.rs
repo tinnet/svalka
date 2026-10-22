@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, anyhow};
-use onlycurves_core::config::{Config, ConfigError};
+use svalka_core::config::{Config, ConfigError};
 
 use crate::binding::{self, Bindings};
 use crate::hwmon::{self, Chip};
@@ -54,7 +54,7 @@ pub fn discover_chips(hwmon_root: &Path) -> anyhow::Result<Vec<Chip>> {
         .with_context(|| format!("cannot list hwmon chips in {}", hwmon_root.display()))
 }
 
-/// E.g. `/etc/onlycurves.toml: 2 problem(s): …`, with every problem listed.
+/// E.g. `/etc/svalka.toml: 2 problem(s): …`, with every problem listed.
 pub(crate) fn invalid(path: &Path, error: &ConfigError) -> anyhow::Error {
     anyhow!("{}: {error}", path.display())
 }

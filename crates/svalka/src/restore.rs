@@ -13,7 +13,7 @@ use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, bail};
-use onlycurves_core::config::ConfigError;
+use svalka_core::config::ConfigError;
 
 use crate::binding;
 use crate::hwmon::Chip;

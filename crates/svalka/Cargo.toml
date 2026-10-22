@@ -1,6 +1,6 @@
 [package]
-name = "onlycurves"
-description = "Fan control for one PC: temperatures in, PWM out, via piecewise-linear curves"
+name = "svalka"
+description = "Fan control for Linux: temperatures in, PWM out, via piecewise-linear curves"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,7 +10,7 @@ repository.workspace = true
 [dependencies]
 anyhow = "1"
 clap = { version = "4.6", features = ["derive"] }
-onlycurves-core = { version = "0.1.0", path = "../onlycurves-core" }
+svalka-core = { version = "0.1.0", path = "../svalka-core" }
 rustix = { version = "1.1.5", features = ["time"] }
 shadow-rs = "1.7"
 signal-hook = "0.4.5"

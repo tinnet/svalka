@@ -1,5 +1,5 @@
 //! The list of outputs `run` holds in manual mode, kept next to state.json in
-//! `/run/onlycurves/outputs`, so that `restore` hands back exactly those even
+//! `/run/svalka/outputs`, so that `restore` hands back exactly those even
 //! if the config on disk has changed or broken since `run` read it.
 //!
 //! One line per output: `<mode> <pwm> <chip directory>`, for example
@@ -30,7 +30,7 @@ impl HeldOutput {
     ///
     /// # Errors
     ///
-    /// Fails for chips whose automatic mode onlycurves does not know.
+    /// Fails for chips whose automatic mode svalka does not know.
     pub fn of(output: &BoundOutput) -> anyhow::Result<Self> {
         Ok(Self {
             chip_dir: output.chip().dir().to_path_buf(),

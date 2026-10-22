@@ -213,7 +213,7 @@ impl Drop for ManualOverride {
             && let Err(error) = self.write_hand_back()
         {
             eprintln!(
-                "onlycurves: could not hand back {}: {error}",
+                "svalka: could not hand back {}: {error}",
                 self.chip.describe_pwm(self.pwm)
             );
         }

@@ -1,5 +1,5 @@
 //! The state snapshot the daemon writes every tick to
-//! `/run/onlycurves/state.json`, for `status` and the later TUI.
+//! `/run/svalka/state.json`, for `status` and the later TUI.
 //!
 //! The daemon only writes it and never reads it back, so the file is not an
 //! interface into the daemon. `version` changes whenever the format does.

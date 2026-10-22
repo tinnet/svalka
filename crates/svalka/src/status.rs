@@ -4,7 +4,7 @@ use std::fmt::Write;
 use std::path::Path;
 
 use anyhow::Context;
-use onlycurves_core::pwm;
+use svalka_core::pwm;
 
 use crate::hwmon::{self, Chip, ChipSnapshot, Fan, Pwm, Temp};
 use crate::setup;

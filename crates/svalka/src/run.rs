@@ -15,9 +15,9 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, bail};
-use onlycurves_core::controller::{FanController, Tick};
-use onlycurves_core::pwm;
-use onlycurves_core::state::{FanMode, FanSnapshot, Snapshot, VERSION};
+use svalka_core::controller::{FanController, Tick};
+use svalka_core::pwm;
+use svalka_core::state::{FanMode, FanSnapshot, Snapshot, VERSION};
 
 use crate::binding::{self, BoundOutput, BoundSensor};
 use crate::hwmon::{HandBack, ManualOverride, PwmEnable, PwmState};
@@ -722,7 +722,7 @@ curve   = [[40, 40], [60, 60]]
     }
 
     fn config_path(sysfs: &FakeSysfs) -> std::path::PathBuf {
-        sysfs.hwmon_root().join("../../onlycurves.toml")
+        sysfs.hwmon_root().join("../../svalka.toml")
     }
 
     fn write_config(sysfs: &FakeSysfs, text: &str) {

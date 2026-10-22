@@ -1,9 +1,9 @@
-# Example onlycurves config: two fans on an nct6798 Super-I/O, one following
+# Example svalka config: two fans on an nct6798 Super-I/O, one following
 # the CPU (k10temp), one following the GPU hotspot (amdgpu).
 #
-# Install as /etc/onlycurves.toml, then check it against your hardware:
-#   onlycurves --config /etc/onlycurves.toml check
-# `onlycurves status` lists the chips, labels and outputs you can use here.
+# Install as /etc/svalka.toml, then check it against your hardware:
+#   svalka --config /etc/svalka.toml check
+# `svalka status` lists the chips, labels and outputs you can use here.
 
 interval = "1s"           # control loop period
 # How often the fan outputs are read back (mode, duty, rpm) to notice a stalled
@@ -16,13 +16,13 @@ failsafe_duty = 100       # % used when any input sensor fails to read
 
 # Temperature inputs, named once. `chip` is the hwmon driver name; add
 # `path = "..."` (the end of the device path) if two chips share a name.
-# `label` is the input's label as `onlycurves status` shows it.
+# `label` is the input's label as `svalka status` shows it.
 [sensors]
 cpu = { chip = "k10temp", label = "Tctl" }
 gpu = { chip = "amdgpu",  label = "junction" }   # read-only; the GPU fan stays on its firmware curve
 
 [fan.cpu_cooler]
-output     = { chip = "nct6798", pwm = 2 }   # `onlycurves identify cpu_cooler` shows which fan this is
+output     = { chip = "nct6798", pwm = 2 }   # `svalka identify cpu_cooler` shows which fan this is
 sources    = ["cpu"]           # several sources: the hottest one wins
 curve      = [[35, 30], [55, 55], [75, 90], [85, 100]]   # [°C, %]
 smoothing  = "8s"              # EMA window on the input temperature

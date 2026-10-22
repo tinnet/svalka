@@ -1,6 +1,6 @@
 [package]
-name = "onlycurves-core"
-description = "Config, curves and PWM scale for onlycurves; no hardware access"
+name = "svalka-core"
+description = "Config, curves and PWM scale for svalka; no hardware access"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

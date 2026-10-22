@@ -1,4 +1,4 @@
-//! onlycurves: fan control for one PC.
+//! svalka: fan control for Linux.
 //!
 //! The binary in `main.rs` only parses the command line; everything it runs
 //! lives in these modules.

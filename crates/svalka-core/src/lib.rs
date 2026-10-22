@@ -1,4 +1,4 @@
-//! The parts of onlycurves that touch no hardware: curves, config, the control
+//! The parts of svalka that touch no hardware: curves, config, the control
 //! logic, the state snapshot and the PWM scale. Shared by the daemon and,
 //! later, the TUI.
 

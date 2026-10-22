@@ -1,4 +1,4 @@
-//! Black-box tests: run the `onlycurves` binary against a fake sysfs tree.
+//! Black-box tests: run the `svalka` binary against a fake sysfs tree.
 
 use std::fs;
 use std::os::unix::fs::symlink;
@@ -11,7 +11,7 @@ use tempfile::TempDir;
 
 /// A small hwmon layout (nct6798, k10temp, amdgpu), with two NVMe drives so that
 /// one name is shared. `class/hwmon` holds the chips, `devices` their devices.
-/// It has everything `examples/onlycurves.toml` refers to.
+/// It has everything `examples/svalka.toml` refers to.
 struct FakeSysfs {
     root: TempDir,
 }
@@ -78,7 +78,7 @@ impl FakeSysfs {
 
     /// Writes a config file next to the fake tree and returns its path.
     fn config(&self, text: &str) -> PathBuf {
-        let path = self.root.path().join("onlycurves.toml");
+        let path = self.root.path().join("svalka.toml");
         fs::write(&path, text).unwrap();
         path
     }
@@ -98,9 +98,9 @@ impl FakeSysfs {
         self.root.path().join("class/hwmon")
     }
 
-    /// `onlycurves --hwmon-root <fake> <args…>`
-    fn onlycurves(&self, args: &[&str]) -> Command {
-        let mut command = onlycurves_bin();
+    /// `svalka --hwmon-root <fake> <args…>`
+    fn svalka(&self, args: &[&str]) -> Command {
+        let mut command = svalka_bin();
         command
             .arg("--hwmon-root")
             .arg(self.hwmon_root())
@@ -108,27 +108,27 @@ impl FakeSysfs {
         command
     }
 
-    /// `onlycurves --hwmon-root <fake> --config <config> --state-dir <state_dir> <command>`
-    fn onlycurves_with(&self, config: &Path, state_dir: &Path, command: &str) -> Command {
-        let mut onlycurves = self.onlycurves(&[]);
-        onlycurves
+    /// `svalka --hwmon-root <fake> --config <config> --state-dir <state_dir> <command>`
+    fn svalka_with(&self, config: &Path, state_dir: &Path, command: &str) -> Command {
+        let mut svalka = self.svalka(&[]);
+        svalka
             .arg("--config")
             .arg(config)
             .arg("--state-dir")
             .arg(state_dir)
             .arg(command);
-        onlycurves
+        svalka
     }
 }
 
 /// The binary under test.
-fn onlycurves_bin() -> Command {
-    Command::new(assert_cmd::cargo_bin!("onlycurves"))
+fn svalka_bin() -> Command {
+    Command::new(assert_cmd::cargo_bin!("svalka"))
 }
 
 /// The example config shipped in the repository.
 fn example_config() -> String {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/onlycurves.toml");
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/svalka.toml");
     fs::read_to_string(path).unwrap()
 }
 
@@ -138,7 +138,7 @@ fn write_attribute(dir: &Path, file: &str, value: &str) {
 
 #[test]
 fn help_lists_the_status_command() {
-    onlycurves_bin()
+    svalka_bin()
         .arg("--help")
         .assert()
         .success()
@@ -147,11 +147,11 @@ fn help_lists_the_status_command() {
 
 #[test]
 fn version_prints_the_crate_version() {
-    onlycurves_bin()
+    svalka_bin()
         .arg("--version")
         .assert()
         .success()
-        .stdout(predicate::str::is_match(r"onlycurves \d+\.\d+\.\d+").unwrap());
+        .stdout(predicate::str::is_match(r"svalka \d+\.\d+\.\d+").unwrap());
 }
 
 #[test]
@@ -159,7 +159,7 @@ fn status_shows_every_chip_with_sensors() {
     let sysfs = FakeSysfs::example_pc();
 
     sysfs
-        .onlycurves(&["status"])
+        .svalka(&["status"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
@@ -180,7 +180,7 @@ fn status_chip_shows_only_that_chip() {
     let sysfs = FakeSysfs::example_pc();
 
     sysfs
-        .onlycurves(&["status", "--chip", "k10temp"])
+        .svalka(&["status", "--chip", "k10temp"])
         .assert()
         .success()
         .stdout(predicate::str::contains("k10temp · 0000:00:18.3"))
@@ -192,7 +192,7 @@ fn status_chip_with_a_shared_name_asks_for_a_path() {
     let sysfs = FakeSysfs::example_pc();
 
     sysfs
-        .onlycurves(&["status", "--chip", "nvme"])
+        .svalka(&["status", "--chip", "nvme"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -205,7 +205,7 @@ fn status_chip_and_path_pick_one_of_several() {
     let sysfs = FakeSysfs::example_pc();
 
     sysfs
-        .onlycurves(&["status", "--chip", "nvme", "--path", "nvme1"])
+        .svalka(&["status", "--chip", "nvme", "--path", "nvme1"])
         .assert()
         .success()
         .stdout(predicate::str::contains("nvme · nvme1"))
@@ -217,7 +217,7 @@ fn status_path_needs_a_chip() {
     let sysfs = FakeSysfs::example_pc();
 
     sysfs
-        .onlycurves(&["status", "--path", "nvme1"])
+        .svalka(&["status", "--path", "nvme1"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("--chip"));
@@ -225,7 +225,7 @@ fn status_path_needs_a_chip() {
 
 #[test]
 fn status_reports_a_missing_hwmon_root() {
-    onlycurves_bin()
+    svalka_bin()
         .args(["--hwmon-root", "/nonexistent/hwmon", "status"])
         .assert()
         .failure()
@@ -240,10 +240,10 @@ fn check_accepts_the_example_config_and_shows_duties() {
     let config = sysfs.config(&example_config());
 
     sysfs
-        .onlycurves(&["--config", config.to_str().unwrap(), "check"])
+        .svalka(&["--config", config.to_str().unwrap(), "check"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("onlycurves.toml is valid."))
+        .stdout(predicate::str::contains("svalka.toml is valid."))
         .stdout(predicate::str::contains("cpu  k10temp Tctl      49.1 °C"))
         .stdout(predicate::str::contains(
             "cpu_cooler  nct6798 pwm2  cpu   49.1 °C  →   48 %  122/255  now  47 %  120/255",
@@ -262,7 +262,7 @@ fn check_lists_every_hardware_problem() {
     let config = sysfs.config(&text);
 
     sysfs
-        .onlycurves(&["--config", config.to_str().unwrap(), "check"])
+        .svalka(&["--config", config.to_str().unwrap(), "check"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("2 problem(s):"))
@@ -281,7 +281,7 @@ fn check_reports_config_errors_before_touching_hardware() {
     let config = sysfs.config(&text);
 
     sysfs
-        .onlycurves(&["--config", config.to_str().unwrap(), "check"])
+        .svalka(&["--config", config.to_str().unwrap(), "check"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -294,11 +294,11 @@ fn check_reports_a_missing_config() {
     let sysfs = FakeSysfs::example_pc();
 
     sysfs
-        .onlycurves(&["--config", "/nonexistent/onlycurves.toml", "check"])
+        .svalka(&["--config", "/nonexistent/svalka.toml", "check"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "cannot read /nonexistent/onlycurves.toml",
+            "cannot read /nonexistent/svalka.toml",
         ));
 }
 
@@ -308,7 +308,7 @@ fn identify_runs_the_fan_and_restores_its_output() {
     let config = sysfs.config(&example_config());
 
     sysfs
-        .onlycurves(&[
+        .svalka(&[
             "--config",
             config.to_str().unwrap(),
             "identify",
@@ -339,7 +339,7 @@ fn identify_lists_the_fans_when_the_name_is_unknown() {
     let config = sysfs.config(&example_config());
 
     sysfs
-        .onlycurves(&["--config", config.to_str().unwrap(), "identify", "intake"])
+        .svalka(&["--config", config.to_str().unwrap(), "identify", "intake"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -357,7 +357,7 @@ fn identify_explains_that_writing_needs_root() {
     fs::set_permissions(&pwm1_enable, fs::Permissions::from_mode(0o444)).unwrap();
 
     sysfs
-        .onlycurves(&["--config", config.to_str().unwrap(), "identify", "exhaust"])
+        .svalka(&["--config", config.to_str().unwrap(), "identify", "exhaust"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -392,7 +392,7 @@ fn run_drives_the_fans_and_hands_them_back_on_sigterm() {
     let state_file = state_dir.path().join("state.json");
 
     let child = sysfs
-        .onlycurves_with(&config, state_dir.path(), "run")
+        .svalka_with(&config, state_dir.path(), "run")
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
@@ -403,8 +403,7 @@ fn run_drives_the_fans_and_hands_them_back_on_sigterm() {
     assert_eq!(nct6798_attribute(&sysfs, "pwm1"), "85");
     assert_eq!(nct6798_attribute(&sysfs, "pwm1_enable"), "1");
     let snapshot =
-        onlycurves_core::state::Snapshot::from_json(&fs::read_to_string(&state_file).unwrap())
-            .unwrap();
+        svalka_core::state::Snapshot::from_json(&fs::read_to_string(&state_file).unwrap()).unwrap();
     let cooler = &snapshot.fans["cpu_cooler"];
     assert_eq!(cooler.source.as_deref(), Some("cpu"));
     assert_eq!(cooler.pwm_raw, 122);
@@ -438,7 +437,7 @@ fn run_refuses_a_state_directory_on_disk_before_touching_fans() {
     let on_disk = Path::new("/");
 
     sysfs
-        .onlycurves_with(&config, on_disk, "run")
+        .svalka_with(&config, on_disk, "run")
         .assert()
         .failure()
         .stderr(predicate::str::contains("not tmpfs"));
@@ -453,7 +452,7 @@ fn restore_hands_every_configured_fan_back_to_the_chip() {
     let state_dir = tempfile::tempdir().unwrap();
 
     sysfs
-        .onlycurves_with(&config, state_dir.path(), "restore")
+        .svalka_with(&config, state_dir.path(), "restore")
         .assert()
         .success()
         .stdout(predicate::str::contains(
@@ -474,7 +473,7 @@ fn restore_ignores_broken_sensors() {
     let state_dir = tempfile::tempdir().unwrap();
 
     sysfs
-        .onlycurves_with(&config, state_dir.path(), "restore")
+        .svalka_with(&config, state_dir.path(), "restore")
         .assert()
         .success();
     assert_eq!(nct6798_attribute(&sysfs, "pwm2_enable"), "5");
@@ -493,7 +492,7 @@ fn restore_uses_the_record_when_the_config_is_broken() {
     .unwrap();
 
     sysfs
-        .onlycurves_with(&config, state_dir.path(), "restore")
+        .svalka_with(&config, state_dir.path(), "restore")
         .assert()
         .success()
         .stdout(predicate::str::contains(
@@ -518,7 +517,7 @@ fn restore_fails_without_record_or_config() {
     let state_dir = tempfile::tempdir().unwrap();
 
     sysfs
-        .onlycurves_with(&config, state_dir.path(), "restore")
+        .svalka_with(&config, state_dir.path(), "restore")
         .assert()
         .failure();
 }
@@ -577,7 +576,7 @@ fn run_talks_to_systemd_and_reloads_on_sighup() {
     let systemd = FakeSystemd::new();
 
     let child = sysfs
-        .onlycurves_with(&config, state_dir.path(), "run")
+        .svalka_with(&config, state_dir.path(), "run")
         .env("NOTIFY_SOCKET", &systemd.path)
         .env("WATCHDOG_USEC", "10000000")
         .stderr(std::process::Stdio::piped())

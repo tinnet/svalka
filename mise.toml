@@ -32,16 +32,16 @@ run = "cargo run --quiet -- status"
 description = "Show every temperature, fan and PWM"
 
 [tasks.check]
-run = "cargo run --quiet -- --config examples/onlycurves.toml check"
+run = "cargo run --quiet -- --config examples/svalka.toml check"
 description = "Check the example config against this machine"
 
 [tasks.install]
-description = "Install the binary and systemd unit (sudo); keeps an existing /etc/onlycurves.toml"
+description = "Install the binary and systemd unit (sudo); keeps an existing /etc/svalka.toml"
 depends = ["package"]
 run = [
-  "sudo install -Dm755 target/release/onlycurves /usr/local/bin/onlycurves",
-  "sudo install -Dm644 dist/onlycurves.service /etc/systemd/system/onlycurves.service",
-  "test -e /etc/onlycurves.toml || sudo install -Dm644 examples/onlycurves.toml /etc/onlycurves.toml",
+  "sudo install -Dm755 target/release/svalka /usr/local/bin/svalka",
+  "sudo install -Dm644 dist/svalka.service /etc/systemd/system/svalka.service",
+  "test -e /etc/svalka.toml || sudo install -Dm644 examples/svalka.toml /etc/svalka.toml",
   "sudo systemctl daemon-reload",
 ]
 

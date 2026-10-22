@@ -4,8 +4,8 @@
 use std::path::Path;
 
 use anyhow::Context;
-use onlycurves_core::controller::Tick;
-use onlycurves_core::pwm;
+use svalka_core::controller::Tick;
+use svalka_core::pwm;
 
 use crate::binding;
 use crate::setup::Setup;
@@ -157,7 +157,7 @@ fn align_columns(rows: &[Vec<String>]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use onlycurves_core::controller::Failsafe;
+    use svalka_core::controller::Failsafe;
 
     use super::*;
 
@@ -209,7 +209,7 @@ mod tests {
     #[test]
     fn renders_sensors_and_fans_in_columns() {
         let expected = "\
-/etc/onlycurves.toml is valid.
+/etc/svalka.toml is valid.
 
 Sensors
   cpu  k10temp Tctl      49.1 °C
@@ -219,10 +219,7 @@ Fans, at the current temperatures (no smoothing or hysteresis)
   cpu_cooler  nct6798 pwm2  cpu   49.1 °C  →   48 %  122/255  now  47 %  120/255
   exhaust     nct6798 pwm1  gpu   47.0 °C  →   47 %  120/255  now  40 %  102/255
 ";
-        assert_eq!(
-            render(Path::new("/etc/onlycurves.toml"), &report()),
-            expected
-        );
+        assert_eq!(render(Path::new("/etc/svalka.toml"), &report()), expected);
     }
 
     #[test]

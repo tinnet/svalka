@@ -1,21 +1,21 @@
 [Unit]
-Description=onlycurves fan control
-Documentation=https://github.com/tinnet/onlycurves
+Description=svalka fan control
+Documentation=https://github.com/tinnet/svalka
 After=systemd-modules-load.service
 # If another fan-control service may be installed, add Conflicts=<its unit>:
 # two daemons writing the same PWM outputs fight over them.
 
 [Service]
 Type=notify
-ExecStart=/usr/local/bin/onlycurves run
+ExecStart=/usr/local/bin/svalka run
 ExecReload=/bin/kill -HUP $MAINPID
 # Runs after every stop, including SIGKILL and panics: hands the fans back
 # to the chip's own curve.
-ExecStopPost=/usr/local/bin/onlycurves restore
+ExecStopPost=/usr/local/bin/svalka restore
 WatchdogSec=10s
 Restart=on-failure
 RestartSec=2s
-RuntimeDirectory=onlycurves
+RuntimeDirectory=svalka
 RuntimeDirectoryMode=0755
 
 NoNewPrivileges=yes
