@@ -202,6 +202,19 @@ impl Chip {
         Ok(millidegrees_to_celsius(millidegrees))
     }
 
+    /// Reads `fanN_input` in rpm, or `None` when the chip has no `fanN`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the input exists but cannot be read.
+    pub fn read_fan(&self, n: u32) -> io::Result<Option<u32>> {
+        let path = self.dir().join(format!("fan{n}_input"));
+        if !path.exists() {
+            return Ok(None);
+        }
+        sysfs::read_value(&path).map(Some)
+    }
+
     /// The numbers N of all PWM outputs `pwmN`.
     ///
     /// # Errors

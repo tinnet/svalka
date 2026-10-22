@@ -336,3 +336,124 @@ fn identify_explains_that_writing_needs_root() {
             "writing nct6798 pwm1 needs root; run this with sudo",
         ));
 }
+
+/// Reads one attribute of the fake nct6798.
+fn nct6798_attribute(sysfs: &FakeSysfs, file: &str) -> String {
+    fs::read_to_string(sysfs.hwmon_root().join("hwmon7").join(file))
+        .unwrap()
+        .trim()
+        .to_owned()
+}
+
+/// Polls `condition` every 50 ms for up to 5 s.
+fn wait_for(condition: impl Fn() -> bool) {
+    for _ in 0..100 {
+        if condition() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("timed out");
+}
+
+#[test]
+fn run_drives_the_fans_and_hands_them_back_on_sigterm() {
+    let sysfs = FakeSysfs::this_pc();
+    let config = sysfs.config(&example_config());
+    let state_dir = tempfile::tempdir_in("/dev/shm").unwrap();
+    let state_file = state_dir.path().join("state.json");
+
+    let child = sysfs
+        .onlycurves(&[
+            "--config",
+            config.to_str().unwrap(),
+            "--state-dir",
+            state_dir.path().to_str().unwrap(),
+            "run",
+        ])
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_for(|| state_file.exists());
+
+    // cpu 49.125 °C on [[35, 30], [55, 55]] -> 47.7 % -> 122; gpu 47 °C -> 46.9 % -> 120.
+    assert_eq!(nct6798_attribute(&sysfs, "pwm2"), "122");
+    assert_eq!(nct6798_attribute(&sysfs, "pwm1"), "120");
+    assert_eq!(nct6798_attribute(&sysfs, "pwm1_enable"), "1");
+    let snapshot =
+        onlycurves_core::state::Snapshot::from_json(&fs::read_to_string(&state_file).unwrap())
+            .unwrap();
+    let cooler = &snapshot.fans["cpu_cooler"];
+    assert_eq!(cooler.source.as_deref(), Some("cpu"));
+    assert_eq!(cooler.pwm_raw, 122);
+    assert_eq!(snapshot.fans["exhaust"].rpm, Some(971));
+
+    let terminated = Command::new("kill")
+        .args(["-TERM", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(terminated.success());
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("cpu_cooler: handed nct6798 pwm2 back to the chip"),
+        "{stderr}"
+    );
+    assert_eq!(nct6798_attribute(&sysfs, "pwm1_enable"), "5");
+    assert_eq!(nct6798_attribute(&sysfs, "pwm2_enable"), "5");
+}
+
+#[test]
+fn run_refuses_a_state_directory_on_disk_before_touching_fans() {
+    let sysfs = FakeSysfs::this_pc();
+    let config = sysfs.config(&example_config());
+    let on_disk = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+
+    sysfs
+        .onlycurves(&[
+            "--config",
+            config.to_str().unwrap(),
+            "--state-dir",
+            on_disk.to_str().unwrap(),
+            "run",
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not tmpfs"));
+    assert_eq!(nct6798_attribute(&sysfs, "pwm1"), "102");
+    assert_eq!(nct6798_attribute(&sysfs, "pwm1_enable"), "1");
+}
+
+#[test]
+fn restore_hands_every_fan_back_to_the_chip() {
+    let sysfs = FakeSysfs::this_pc();
+    let config = sysfs.config(&example_config());
+
+    sysfs
+        .onlycurves(&["--config", config.to_str().unwrap(), "restore"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "cpu_cooler: nct6798 pwm2 handed back to the chip (mode 5)",
+        ))
+        .stdout(predicate::str::contains(
+            "exhaust: nct6798 pwm1 handed back to the chip (mode 5)",
+        ));
+    assert_eq!(nct6798_attribute(&sysfs, "pwm1_enable"), "5");
+    assert_eq!(nct6798_attribute(&sysfs, "pwm2_enable"), "5");
+}
+
+#[test]
+fn restore_ignores_broken_sensors() {
+    let sysfs = FakeSysfs::this_pc();
+    let text = example_config().replace(r#"label = "Tctl""#, r#"label = "Tcl""#);
+    let config = sysfs.config(&text);
+
+    sysfs
+        .onlycurves(&["--config", config.to_str().unwrap(), "restore"])
+        .assert()
+        .success();
+    assert_eq!(nct6798_attribute(&sysfs, "pwm2_enable"), "5");
+}

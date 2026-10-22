@@ -190,6 +190,14 @@ impl Drop for ManualOverride {
     }
 }
 
+/// The `pwmN_enable` mode in which `chip` runs its own fan curve, for the
+/// drivers where it is known: 5 (SmartFan IV) on the nct6775 family
+/// (nct6106 … nct6799).
+#[must_use]
+pub fn automatic_mode(chip: &Chip) -> Option<u8> {
+    chip.name().starts_with("nct6").then_some(5)
+}
+
 /// Whether `state` is still what we set: duty `raw` in manual mode, i.e.
 /// nothing else has written to the output since we did.
 ///

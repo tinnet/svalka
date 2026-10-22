@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
-use onlycurves::{check, identify, signals, status};
+use onlycurves::{check, identify, restore, run, signals, status};
 use shadow_rs::shadow;
 
 shadow!(build);
@@ -19,6 +19,10 @@ struct Cli {
     #[arg(long, global = true, default_value = "/etc/onlycurves.toml")]
     config: PathBuf,
 
+    /// Where `run` writes state.json; must be on tmpfs. Only tests change it.
+    #[arg(long, global = true, hide = true, default_value = "/run/onlycurves")]
+    state_dir: PathBuf,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -31,6 +35,10 @@ enum Command {
     Check,
     /// Run one fan at 100 % for a few seconds, then restore it (needs root)
     Identify(IdentifyArgs),
+    /// Control the fans until stopped, then hand them back to the chip (needs root)
+    Run,
+    /// Hand every configured fan back to the chip's own curve (needs root)
+    Restore,
 }
 
 #[derive(Args)]
@@ -79,6 +87,11 @@ fn main() -> anyhow::Result<()> {
                 &mut std::io::stdout(),
             )?;
         }
+        Command::Run => {
+            let stop = signals::stop_flag()?;
+            run::run(&cli.config, &cli.hwmon_root, &cli.state_dir, &stop)?;
+        }
+        Command::Restore => restore::run(&cli.config, &cli.hwmon_root, &mut std::io::stdout())?,
     }
     Ok(())
 }

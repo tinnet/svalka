@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use crate::sysfs;
 
-pub use control::{HandBack, ManualOverride, PwmState, is_held};
+pub use control::{HandBack, ManualOverride, PwmState, automatic_mode, is_held};
 pub use resolve::{ResolveError, resolve};
 pub use sensors::{ChipSnapshot, Fan, Pwm, PwmEnable, Temp};
 

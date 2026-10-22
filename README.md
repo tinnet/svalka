@@ -7,8 +7,9 @@ curves, write fan PWM. Replaces CoolerControl on an ASUS B550-I / Ryzen 7
 
 ## Status
 
-Milestones 1–3 of 6 are done: `status`, `check` and `identify`. `status`
-and `check` are read-only and need no root; `identify` writes, briefly.
+Milestones 1–4 of 7 are done: `status`, `check`, `identify` and `run`
+(with `restore`). `status` and `check` are read-only and need no root; the
+others write to the fans.
 
 ### `onlycurves status`
 
@@ -84,6 +85,30 @@ Stop CoolerControl first (`sudo systemctl stop coolercontrold`): if another
 program writes the output during the test, `identify` stops and restores it.
 Ctrl-C and SIGTERM also restore before exiting.
 
+### `sudo onlycurves run`
+
+The control loop. It takes every configured fan into manual mode, then once
+per `interval`: reads every sensor, takes each fan's hottest source, smooths
+it (`smoothing`), holds small drops (`hysteresis`), applies the curve and
+`min_duty`, and writes the duty when it changed. Each tick it also writes
+`/run/onlycurves/state.json` (refused unless that is on tmpfs).
+
+- A sensor that cannot be read, or jumps by more than 20 °C in one tick,
+  puts its fans at `failsafe_duty` for that tick.
+- If the output is switched away (resume from suspend, another program), it
+  logs that once and takes it back.
+- A fan reading 0 rpm at 30 % or more for 5 ticks is logged as stalled.
+- Ctrl-C, SIGTERM and SIGHUP stop it. On exit, and on errors, every output
+  goes back to the chip's own SmartFan IV curve (`pwmN_enable = 5`).
+- Logs go to stderr: plain in a terminal, with journald priorities under
+  systemd.
+
+### `sudo onlycurves restore`
+
+Hands every configured output back to the chip's own curve. systemd runs it
+after `run` exits for any reason, including `kill -9`. It only needs the
+config's outputs, so a broken sensor cannot block it.
+
 ## Developing
 
 Toolchain and tasks come from [mise](https://mise.jdx.dev/):
@@ -104,6 +129,8 @@ crates/onlycurves-core/     no hardware access; shared with the later TUI
   src/curve.rs              piecewise-linear curves and their rules
   src/config.rs             parsing and validating the TOML config
   src/duration.rs           "8s" / "500ms" values
+  src/controller.rs         one tick of one fan: smoothing, hysteresis, failsafe
+  src/state.rs              the state.json snapshot format
   src/pwm.rs                percent <-> raw 0-255
 crates/onlycurves/          the daemon and CLI (library + thin main.rs)
   src/main.rs               command line only
@@ -114,6 +141,10 @@ crates/onlycurves/          the daemon and CLI (library + thin main.rs)
   src/status.rs             the `status` command
   src/check.rs              the `check` command
   src/identify.rs           the `identify` command
+  src/run.rs                the `run` command: the control loop
+  src/restore.rs            the `restore` command
+  src/statefile.rs          state.json, tmpfs only, atomic writes
+  src/log.rs                stderr logging, journald priorities under systemd
   src/setup.rs              load config + bind, shared by commands
   src/signals.rs            SIGINT/SIGTERM -> a stop flag
   src/hwmon/control.rs      manual PWM control that always restores

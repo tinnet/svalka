@@ -64,6 +64,16 @@ impl BoundOutput {
         format!("{} pwm{}", self.chip.name(), self.pwm)
     }
 
+    /// The fan's speed from the tachometer with the same number (`fanN` for
+    /// `pwmN`, as `identify` confirmed on this board), or `None` without one.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the tachometer exists but cannot be read.
+    pub fn read_rpm(&self) -> io::Result<Option<u32>> {
+        self.chip.read_fan(self.pwm)
+    }
+
     /// The chip the output belongs to.
     #[must_use]
     pub fn chip(&self) -> &Chip {
@@ -101,7 +111,29 @@ pub fn bind(config: &Config, chips: &[Chip]) -> Result<Bindings, Vec<String>> {
             Err(problem) => problems.push(format!("sensors.{name}: {problem}")),
         }
     }
+    let outputs = bind_outputs(config, chips).unwrap_or_else(|output_problems| {
+        problems.extend(output_problems);
+        BTreeMap::new()
+    });
 
+    if problems.is_empty() {
+        Ok(Bindings { sensors, outputs })
+    } else {
+        Err(problems)
+    }
+}
+
+/// Ties only the fan outputs, by fan name. `restore` uses this so that a
+/// broken sensor cannot stop it from handing the fans back.
+///
+/// # Errors
+///
+/// Returns one message per output that cannot be bound.
+pub fn bind_outputs(
+    config: &Config,
+    chips: &[Chip],
+) -> Result<BTreeMap<String, BoundOutput>, Vec<String>> {
+    let mut problems = Vec::new();
     let mut outputs = BTreeMap::new();
     for (name, fan) in &config.fans {
         match bind_output(&fan.output, chips) {
@@ -109,9 +141,8 @@ pub fn bind(config: &Config, chips: &[Chip]) -> Result<Bindings, Vec<String>> {
             Err(problem) => problems.push(format!("fan.{name}: output: {problem}")),
         }
     }
-
     if problems.is_empty() {
-        Ok(Bindings { sensors, outputs })
+        Ok(outputs)
     } else {
         Err(problems)
     }
