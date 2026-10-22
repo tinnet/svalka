@@ -2,6 +2,11 @@
 # Installed as /etc/onlycurves.toml. Check it with: onlycurves --config <file> check
 
 interval = "1s"           # control loop period
+# How often the fan outputs are read back (mode, duty, rpm) to notice a stalled
+# fan or another program taking an output over. Duties are still written every
+# interval. On this board each read of the nct6798 costs ~84 ms of CPU (the
+# driver goes through ASUS WMI), so reading it every second costs ~4 % of a core.
+readback_interval = "10s"
 failsafe_duty = 100       # % used when any input sensor fails to read
 
 # Temperature inputs, named once. `chip` is the hwmon driver name; add

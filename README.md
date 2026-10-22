@@ -95,9 +95,14 @@ it (`smoothing`), holds small drops (`hysteresis`), applies the curve and
 
 - A sensor that cannot be read, or jumps by more than 20 °C in one tick,
   puts its fans at `failsafe_duty` for that tick.
+- The fan outputs themselves are read back only every `readback_interval`
+  (default 10 s): on ASUS boards each read of the nct6798 goes through ACPI
+  WMI and costs ~84 ms of CPU, so reading every second would cost ~4 % of a
+  core. Duties are still written every tick; writes are cheap.
 - If the output is switched away (resume from suspend, another program), it
-  logs that once and takes it back.
-- A fan reading 0 rpm at 30 % or more for 5 ticks is logged as stalled.
+  logs that once and takes it back at the next readback.
+- A fan reading 0 rpm at 30 % or more for about 5 s (at least two readbacks
+  in a row) is logged as stalled.
 - Ctrl-C and SIGTERM stop it; SIGHUP reloads the config. On exit, and on
   errors, every output goes back to the chip's own SmartFan IV curve
   (`pwmN_enable = 5`).

@@ -31,11 +31,11 @@ use crate::statefile::StateFile;
 /// At or above this duty, a tachometer reading 0 rpm means a stalled fan.
 const STALL_MIN_PERCENT: f64 = 30.0;
 
-/// Ticks of 0 rpm before a stall is reported. The nct6775 driver refreshes
-/// rpm only every 1.5–2 s, and a fan needs a moment to spin up.
-const STALL_TICKS: u32 = 5;
+/// How long a fan must read 0 rpm before a stall is reported. The nct6775
+/// driver refreshes rpm only every 1.5–2 s, and a fan needs a moment to spin up.
+const STALL_TIME: Duration = Duration::from_secs(5);
 
-/// Ticks in a row a fan's output may fail before the daemon gives up. A
+/// Attempts in a row a fan's output may fail before the daemon gives up. A
 /// single EIO from the Super-I/O (e.g. around a resume) should not stop the
 /// daemon; an output that stays broken should.
 const MAX_OUTPUT_ERRORS: u32 = 10;
@@ -80,6 +80,9 @@ pub fn run(paths: &Paths, signals: &DaemonSignals, notifier: &Notifier) -> anyho
 struct Daemon<'a> {
     paths: &'a Paths<'a>,
     interval: Duration,
+    readback_interval: Duration,
+    /// When the fan outputs are next read back.
+    next_readback: Instant,
     sensors: BTreeMap<String, BoundSensor>,
     fans: Vec<FanLoop>,
     state_file: StateFile,
@@ -108,6 +111,8 @@ impl<'a> Daemon<'a> {
         Self {
             paths,
             interval: Duration::ZERO,
+            readback_interval: Duration::ZERO,
+            next_readback: Instant::now(),
             sensors: BTreeMap::new(),
             fans: Vec::new(),
             record: OutputRecord::in_dir(state_file.dir()),
@@ -157,9 +162,10 @@ impl<'a> Daemon<'a> {
     /// One tick, then the state file and systemd's watchdog and status.
     fn tick_and_publish(&mut self) -> anyhow::Result<()> {
         let sensors = binding::read_sensors(&self.sensors);
+        let readback = self.readback_due();
         let mut fans = BTreeMap::new();
         for fan in &mut self.fans {
-            fans.insert(fan.name.clone(), fan.tick(&sensors)?);
+            fans.insert(fan.name.clone(), fan.tick(&sensors, readback)?);
         }
         let snapshot = Snapshot {
             version: VERSION,
@@ -171,6 +177,17 @@ impl<'a> Daemon<'a> {
         self.notifier.watchdog();
         self.publish_status(&snapshot);
         Ok(())
+    }
+
+    /// Whether this tick reads the fan outputs back. All fans read back on the
+    /// same tick, so one refresh of the chip's register cache serves them all.
+    fn readback_due(&mut self) -> bool {
+        let now = Instant::now();
+        if now < self.next_readback {
+            return false;
+        }
+        self.next_readback = now + self.readback_interval;
+        true
     }
 
     /// Writes the snapshot, logging a failure once rather than every tick:
@@ -247,19 +264,24 @@ impl<'a> Daemon<'a> {
         for (name, fan) in &setup.config.fans {
             let output = setup.bindings.outputs[name].clone();
             let controller = setup.config.controller(fan);
+            let stall_after = stall_readbacks(setup.config.readback_interval);
             let fan_loop = if let Some(manual) = taken.remove(name) {
-                FanLoop::new(name, output, manual, controller)
+                FanLoop::new(name, output, manual, controller, stall_after)
             } else {
                 let index = old
                     .iter()
                     .position(|kept| kept.output.same_output(&output))
                     .expect("outputs not taken over above are in the running config");
-                old.swap_remove(index).renamed(name, output, controller)
+                old.swap_remove(index)
+                    .renamed(name, output, controller, stall_after)
             };
             self.fans.push(fan_loop);
         }
         hand_back_all(old);
         self.interval = setup.config.interval;
+        self.readback_interval = setup.config.readback_interval;
+        // Read back on the next tick: new outputs, and a fresh rpm for all.
+        self.next_readback = Instant::now();
         self.sensors = setup.bindings.sensors;
 
         // Only the new outputs now. If this fails the record lists a few
@@ -357,11 +379,23 @@ struct FanLoop {
     controller: FanController,
     /// The raw duty we last wrote.
     written: Option<u8>,
+    /// `pwmN_enable` and the tachometer at the last readback.
+    pwm_enable: Option<PwmEnable>,
+    rpm: Option<u32>,
     failsafe: Episode,
     interference: Episode,
     stall: Episode,
-    /// Reading or writing the output failing, tick after tick.
+    /// Reading or writing the output failing, attempt after attempt.
     output_errors: Episode,
+}
+
+/// Readbacks in a row that must show 0 rpm before a stall is reported: about
+/// [`STALL_TIME`], but at least two, so one stale reading is not enough.
+fn stall_readbacks(readback_interval: Duration) -> u32 {
+    let readbacks = STALL_TIME.as_secs_f64() / readback_interval.as_secs_f64();
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // small and positive
+    let readbacks = readbacks.ceil() as u32;
+    readbacks.max(2)
 }
 
 /// Switches `output` to manual, to be handed back to the chip's automatic mode.
@@ -408,6 +442,7 @@ impl FanLoop {
         output: BoundOutput,
         manual: ManualOverride,
         controller: FanController,
+        stall_after: u32,
     ) -> Self {
         Self {
             name: name.to_owned(),
@@ -416,37 +451,57 @@ impl FanLoop {
             manual,
             controller,
             written: None,
+            pwm_enable: None,
+            rpm: None,
             failsafe: Episode::default(),
             interference: Episode::default(),
-            stall: Episode::after(STALL_TICKS),
+            stall: Episode::after(stall_after),
             output_errors: Episode::default(),
         }
     }
 
     /// The same output under a reloaded config: keeps the takeover and the duty
     /// last written, starts everything else afresh.
-    fn renamed(self, name: &str, output: BoundOutput, controller: FanController) -> Self {
+    fn renamed(
+        self,
+        name: &str,
+        output: BoundOutput,
+        controller: FanController,
+        stall_after: u32,
+    ) -> Self {
         Self {
             written: self.written,
-            ..Self::new(name, output, self.manual, controller)
+            ..Self::new(name, output, self.manual, controller, stall_after)
         }
     }
 
-    fn tick(&mut self, sensors: &BTreeMap<String, Option<f64>>) -> anyhow::Result<FanSnapshot> {
+    /// One tick: a duty from the controller, written if it changed. On
+    /// `readback` ticks also reads the output and tachometer back.
+    fn tick(
+        &mut self,
+        sensors: &BTreeMap<String, Option<f64>>,
+        readback: bool,
+    ) -> anyhow::Result<FanSnapshot> {
         let tick = self.controller.tick(sensors);
         self.report_failsafe(&tick);
         let raw = pwm::percent_to_raw(tick.duty);
-        let pwm_enable = self.write_duty_or_count_failure(raw)?;
-        let rpm = self.output.read_rpm().ok().flatten();
-        self.check_stall(raw, rpm);
-        Ok(self.snapshot(&tick, raw, pwm_enable, rpm))
+        self.drive_output(raw, readback)?;
+        if readback {
+            self.rpm = self.output.read_rpm().ok().flatten();
+            self.check_stall(raw);
+        }
+        Ok(self.snapshot(&tick, raw))
     }
 
     /// [`FanLoop::write_duty`], tolerating a failing output for up to
-    /// [`MAX_OUTPUT_ERRORS`] ticks in a row; after that the daemon gives up,
-    /// so the chip's own curve and `restore` take over.
-    fn write_duty_or_count_failure(&mut self, raw: u8) -> anyhow::Result<Option<PwmEnable>> {
-        let result = self.write_duty(raw);
+    /// [`MAX_OUTPUT_ERRORS`] attempts in a row; after that the daemon gives
+    /// up, so the chip's own curve and `restore` take over. Ticks that leave
+    /// the output alone neither count nor reset.
+    fn drive_output(&mut self, raw: u8, readback: bool) -> anyhow::Result<()> {
+        let result = self.write_duty(raw, readback);
+        if matches!(result, Ok(false)) {
+            return Ok(());
+        }
         let edge = self.output_errors.observe(result.is_err());
         match (&result, edge) {
             (Err(error), Some(Edge::Began)) => {
@@ -459,28 +514,21 @@ impl FanLoop {
         }
         if self.output_errors.ticks >= MAX_OUTPUT_ERRORS {
             bail!(
-                "{}: {} failed {MAX_OUTPUT_ERRORS} ticks in a row; giving up so the chip's \
+                "{}: {} failed {MAX_OUTPUT_ERRORS} times in a row; giving up so the chip's \
                  own curve takes over",
                 self.name,
                 self.description
             );
         }
-        Ok(result.unwrap_or(None))
+        Ok(())
     }
 
-    /// Writes `raw` if it differs from what we wrote last. Takes the output
-    /// back first if something else changed it, or if the last tick failed and
-    /// we cannot know what it holds. Returns `pwmN_enable` as read.
-    fn write_duty(&mut self, raw: u8) -> anyhow::Result<Option<PwmEnable>> {
-        let current = self
-            .manual
-            .current()
-            .with_context(|| format!("cannot read {}", self.label()))?;
-        let interfered = self
-            .written
-            .is_some_and(|written| !current.is_held_at(written));
-        self.report_interference(interfered, current);
-
+    /// Writes `raw` if it differs from what we wrote last. On `readback` ticks
+    /// it first reads the output and takes it back if something else changed
+    /// it; it also takes it back after a failed attempt, when we cannot know
+    /// what it holds. Returns whether it touched the output at all.
+    fn write_duty(&mut self, raw: u8, readback: bool) -> anyhow::Result<bool> {
+        let interfered = readback && self.read_back()?;
         if interfered || self.output_errors.is_active() {
             self.manual
                 .reassert(raw)
@@ -489,9 +537,27 @@ impl FanLoop {
             self.manual
                 .set(raw)
                 .with_context(|| format!("cannot write {}", self.label()))?;
+        } else {
+            return Ok(readback);
         }
         self.written = Some(raw);
-        Ok(current.enable)
+        Ok(true)
+    }
+
+    /// Reads the output's duty and mode. Returns whether something else
+    /// changed it since our last write.
+    fn read_back(&mut self) -> anyhow::Result<bool> {
+        self.pwm_enable = None;
+        let current = self
+            .manual
+            .current()
+            .with_context(|| format!("cannot read {}", self.label()))?;
+        self.pwm_enable = current.enable;
+        let interfered = self
+            .written
+            .is_some_and(|written| !current.is_held_at(written));
+        self.report_interference(interfered, current);
+        Ok(interfered)
     }
 
     /// E.g. `cpu_cooler: nct6798 pwm2`, for error messages.
@@ -535,28 +601,23 @@ impl FanLoop {
         }
     }
 
-    /// Warns once when the tachometer reads 0 rpm for [`STALL_TICKS`] ticks at
-    /// a duty that should turn the fan.
-    fn check_stall(&mut self, raw: u8, rpm: Option<u32>) {
-        let stalled = rpm == Some(0) && raw >= pwm::percent_to_raw(STALL_MIN_PERCENT);
+    /// Warns once when the tachometer reads 0 rpm on several readbacks in a
+    /// row (see [`stall_readbacks`]) at a duty that should turn the fan.
+    fn check_stall(&mut self, raw: u8) {
+        let stalled = self.rpm == Some(0) && raw >= pwm::percent_to_raw(STALL_MIN_PERCENT);
         match self.stall.observe(stalled) {
             Some(Edge::Began) => log::warning(format!(
-                "{}: 0 rpm at {} % for {STALL_TICKS} ticks; the fan may be stalled or unplugged",
+                "{}: 0 rpm at {} % on {} readbacks in a row; the fan may be stalled or unplugged",
                 self.name,
-                pwm::raw_to_percent(raw)
+                pwm::raw_to_percent(raw),
+                self.stall.after
             )),
             Some(Edge::Ended) => log::info(format!("{}: spinning again", self.name)),
             None => {}
         }
     }
 
-    fn snapshot(
-        &self,
-        tick: &Tick,
-        raw: u8,
-        pwm_enable: Option<PwmEnable>,
-        rpm: Option<u32>,
-    ) -> FanSnapshot {
+    fn snapshot(&self, tick: &Tick, raw: u8) -> FanSnapshot {
         FanSnapshot {
             output: self.description.clone(),
             mode: if tick.failsafe.is_some() {
@@ -570,8 +631,8 @@ impl FanLoop {
             effective_celsius: tick.effective,
             duty: tick.duty,
             pwm_raw: raw,
-            pwm_enable: pwm_enable.map(u8::from),
-            rpm,
+            pwm_enable: self.pwm_enable.map(u8::from),
+            rpm: self.rpm,
         }
     }
 }
@@ -725,8 +786,12 @@ curve   = [[40, 40], [60, 60]]
                 .chip()
                 .write_pwm_enable(2, PwmEnable::Automatic(5))
                 .unwrap();
-            daemon.tick_and_publish().unwrap();
 
+            daemon.tick_and_publish().unwrap();
+            assert_eq!(pwm2(sysfs).1, "5", "not noticed between readbacks");
+
+            daemon.next_readback = Instant::now();
+            daemon.tick_and_publish().unwrap();
             assert_eq!(pwm2(sysfs), ("128".into(), "1".into()));
             assert!(daemon.fans[0].interference.is_active());
         });
@@ -782,17 +847,46 @@ curve   = [[40, 40], [60, 60]]
     fn a_stall_counts_only_at_a_duty_that_should_spin() {
         with_daemon(|_sysfs, daemon| {
             let fan = &mut daemon.fans[0];
+            let after = fan.stall.after;
+            fan.rpm = Some(0);
 
-            fan.check_stall(pwm::percent_to_raw(20.0), Some(0));
+            fan.check_stall(pwm::percent_to_raw(20.0));
             assert!(!fan.stall.is_active());
 
-            for _ in 0..STALL_TICKS {
-                fan.check_stall(pwm::percent_to_raw(50.0), Some(0));
+            for _ in 0..after {
+                fan.check_stall(pwm::percent_to_raw(50.0));
             }
-            assert_eq!(fan.stall.ticks, STALL_TICKS);
+            assert_eq!(fan.stall.ticks, after);
 
-            fan.check_stall(pwm::percent_to_raw(50.0), Some(800));
+            fan.rpm = Some(800);
+            fan.check_stall(pwm::percent_to_raw(50.0));
             assert!(!fan.stall.is_active());
+        });
+    }
+
+    #[test]
+    fn a_stall_needs_about_five_seconds_but_two_readbacks() {
+        assert_eq!(stall_readbacks(Duration::from_secs(1)), 5);
+        assert_eq!(stall_readbacks(Duration::from_secs(2)), 3);
+        assert_eq!(stall_readbacks(Duration::from_secs(10)), 2);
+    }
+
+    #[test]
+    fn ticks_between_readbacks_do_not_read_the_outputs() {
+        with_daemon(|sysfs, daemon| {
+            // Readback ran on the first tick; until the next one, a fan whose
+            // duty does not change leaves its output untouched.
+            fs::remove_file(sysfs.hwmon_root().join("hwmon7/fan2_input")).unwrap();
+            daemon.tick_and_publish().unwrap();
+            assert_eq!(
+                daemon.fans[0].rpm,
+                Some(1036),
+                "kept from the last readback"
+            );
+
+            daemon.next_readback = Instant::now();
+            daemon.tick_and_publish().unwrap();
+            assert_eq!(daemon.fans[0].rpm, None);
         });
     }
 

@@ -21,6 +21,11 @@ use crate::duration;
 pub struct Config {
     /// How often the control loop runs.
     pub interval: Duration,
+    /// How often the fan outputs are read back (duty, mode, rpm) to notice a
+    /// stall or something else taking an output over. Duties are still
+    /// written every `interval`. On ASUS boards each read of the nct6798 costs
+    /// about 84 ms of CPU, so this is longer than `interval` by default.
+    pub readback_interval: Duration,
     /// Duty in percent for fans whose sources cannot be read.
     pub failsafe_duty: f64,
     /// Temperature inputs, by the name fans refer to them with.
@@ -141,6 +146,11 @@ struct ConfigFile {
         deserialize_with = "duration::deserialize"
     )]
     interval: Duration,
+    #[serde(
+        default = "default_readback_interval",
+        deserialize_with = "duration::deserialize"
+    )]
+    readback_interval: Duration,
     #[serde(default = "default_failsafe_duty")]
     failsafe_duty: f64,
     #[serde(default)]
@@ -169,6 +179,10 @@ fn default_interval() -> Duration {
     Duration::from_secs(1)
 }
 
+fn default_readback_interval() -> Duration {
+    Duration::from_secs(10)
+}
+
 fn default_failsafe_duty() -> f64 {
     100.0
 }
@@ -195,6 +209,7 @@ impl ConfigFile {
         if problems.is_empty() {
             Ok(Config {
                 interval: self.interval,
+                readback_interval: self.readback_interval,
                 failsafe_duty: self.failsafe_duty,
                 sensors: self.sensors,
                 fans,
@@ -207,6 +222,9 @@ impl ConfigFile {
     fn check_top_level(&self, problems: &mut Vec<String>) {
         if self.interval.is_zero() {
             problems.push("interval must be longer than 0s".to_owned());
+        }
+        if self.readback_interval.is_zero() {
+            problems.push("readback_interval must be longer than 0s".to_owned());
         }
         if !is_percent(self.failsafe_duty) {
             problems.push(format!(
@@ -397,6 +415,20 @@ hysteresis = 2.0
         let text = DESIGN_DOC.replace(r#"interval = "1s""#, r#"interval = "0s""#);
 
         assert_eq!(problems(&text), ["interval must be longer than 0s"]);
+    }
+
+    #[test]
+    fn readback_interval_defaults_to_ten_seconds_and_must_not_be_zero() {
+        assert_eq!(
+            Config::parse(DESIGN_DOC).unwrap().readback_interval,
+            Duration::from_secs(10)
+        );
+
+        let text = format!("readback_interval = \"0s\"\n{DESIGN_DOC}");
+        assert_eq!(
+            problems(&text),
+            ["readback_interval must be longer than 0s"]
+        );
     }
 
     #[test]

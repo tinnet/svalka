@@ -40,9 +40,9 @@ pub struct FanSnapshot {
     pub duty: f64,
     /// Raw duty written to the output, 0–255.
     pub pwm_raw: u8,
-    /// `pwmN_enable` as read back this tick.
+    /// `pwmN_enable` at the last readback (up to `readback_interval` old).
     pub pwm_enable: Option<u8>,
-    /// The fan's tachometer, if it has one.
+    /// The fan's tachometer at the last readback, if it has one.
     pub rpm: Option<u32>,
 }
 
