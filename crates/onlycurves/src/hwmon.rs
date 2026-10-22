@@ -4,6 +4,7 @@
 //! changes between boots. A chip is therefore identified by its driver `name`
 //! plus the device it belongs to, never by its number.
 
+mod control;
 mod resolve;
 mod sensors;
 
@@ -13,6 +14,7 @@ use std::path::{Path, PathBuf};
 
 use crate::sysfs;
 
+pub use control::{ManualOverride, PwmState};
 pub use resolve::{ResolveError, resolve};
 pub use sensors::{ChipSnapshot, Fan, Pwm, PwmEnable, Temp};
 

@@ -24,6 +24,11 @@ pub fn read_value<T: FromStr>(path: &Path) -> io::Result<T> {
     })
 }
 
+/// Writes one value to an attribute file.
+pub fn write_value(path: &Path, value: impl std::fmt::Display) -> io::Result<()> {
+    fs::write(path, value.to_string())
+}
+
 /// Parses the index out of an indexed attribute name such as `temp3_input`.
 ///
 /// Returns `Some(3)` for `("temp3_input", "temp", "_input")`, and `None` when the
