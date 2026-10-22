@@ -1,11 +1,16 @@
-# onlycurves config for this PC (ASUS B550-I, Ryzen 7 5700X3D, RX 9070 XT).
-# Installed as /etc/onlycurves.toml. Check it with: onlycurves --config <file> check
+# Example onlycurves config: two fans on an nct6798 Super-I/O, one following
+# the CPU (k10temp), one following the GPU hotspot (amdgpu).
+#
+# Install as /etc/onlycurves.toml, then check it against your hardware:
+#   onlycurves --config /etc/onlycurves.toml check
+# `onlycurves status` lists the chips, labels and outputs you can use here.
 
 interval = "1s"           # control loop period
 # How often the fan outputs are read back (mode, duty, rpm) to notice a stalled
 # fan or another program taking an output over. Duties are still written every
-# interval. On this board each read of the nct6798 costs ~84 ms of CPU (the
-# driver goes through ASUS WMI), so reading it every second costs ~4 % of a core.
+# interval. On some ASUS boards each read of the nct6798 costs ~84 ms of CPU
+# (the driver goes through ACPI WMI), so reading it every second costs ~4 % of
+# a core.
 readback_interval = "10s"
 failsafe_duty = 100       # % used when any input sensor fails to read
 
@@ -14,12 +19,10 @@ failsafe_duty = 100       # % used when any input sensor fails to read
 # `label` is the input's label as `onlycurves status` shows it.
 [sensors]
 cpu = { chip = "k10temp", label = "Tctl" }
-gpu = { chip = "amdgpu",  label = "junction" }   # read-only; the GPU fan stays on firmware
+gpu = { chip = "amdgpu",  label = "junction" }   # read-only; the GPU fan stays on its firmware curve
 
-# The CPU cooler curve came from CoolerControl; the exhaust curve was tuned on
-# 2026-10-21 after watching WoW: GPU junction 62–72 °C, CPU ~46 °C.
 [fan.cpu_cooler]
-output     = { chip = "nct6798", pwm = 2 }
+output     = { chip = "nct6798", pwm = 2 }   # `onlycurves identify cpu_cooler` shows which fan this is
 sources    = ["cpu"]           # several sources: the hottest one wins
 curve      = [[35, 30], [55, 55], [75, 90], [85, 100]]   # [°C, %]
 smoothing  = "8s"              # EMA window on the input temperature
@@ -29,8 +32,8 @@ min_duty   = 20                # % floor: this fan never stops
 [fan.exhaust]
 output     = { chip = "nct6798", pwm = 1 }
 sources    = ["gpu"]
-# Gentle while the GPU runs cool (~40–50 % at 65–70 °C, it was ~65 %), still
-# full speed by 90 °C junction.
+# Quiet while the GPU runs cool (~45–55 % at a 65–70 °C hotspot), full speed
+# by 90 °C.
 curve      = [[40, 30], [60, 40], [75, 60], [90, 100]]
 smoothing  = "8s"
 hysteresis = 2.0

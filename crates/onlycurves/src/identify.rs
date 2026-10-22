@@ -96,9 +96,8 @@ pub fn run(
         Hold::Finished => writeln!(out, "{}", verdict(&changes, output.pwm()))?,
         Hold::Stopped => bail!("stopped before the time was up"),
         Hold::Interfered(found) => bail!(
-            "{} changed to {found} during the test, so another program wrote to it, \
-             probably CoolerControl. Stop it with `sudo systemctl stop coolercontrold` \
-             and try again.",
+            "{} changed to {found} during the test, so another program wrote to it. \
+             Stop any other fan-control program and try again.",
             output.describe()
         ),
     }

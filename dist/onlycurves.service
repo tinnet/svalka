@@ -2,8 +2,8 @@
 Description=onlycurves fan control
 Documentation=https://github.com/tinnet/onlycurves
 After=systemd-modules-load.service
-# Both would write the same PWM outputs.
-Conflicts=coolercontrold.service
+# If another fan-control service may be installed, add Conflicts=<its unit>:
+# two daemons writing the same PWM outputs fight over them.
 
 [Service]
 Type=notify

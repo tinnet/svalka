@@ -9,7 +9,7 @@ use assert_cmd::prelude::*;
 use predicates::prelude::*;
 use tempfile::TempDir;
 
-/// A small copy of this PC's hwmon layout, with two NVMe drives added so that
+/// A small hwmon layout (nct6798, k10temp, amdgpu), with two NVMe drives so that
 /// one name is shared. `class/hwmon` holds the chips, `devices` their devices.
 /// It has everything `examples/onlycurves.toml` refers to.
 struct FakeSysfs {
@@ -17,7 +17,7 @@ struct FakeSysfs {
 }
 
 impl FakeSysfs {
-    fn this_pc() -> Self {
+    fn example_pc() -> Self {
         let sysfs = Self {
             root: tempfile::tempdir().unwrap(),
         };
@@ -156,7 +156,7 @@ fn version_prints_the_crate_version() {
 
 #[test]
 fn status_shows_every_chip_with_sensors() {
-    let sysfs = FakeSysfs::this_pc();
+    let sysfs = FakeSysfs::example_pc();
 
     sysfs
         .onlycurves(&["status"])
@@ -177,7 +177,7 @@ fn status_shows_every_chip_with_sensors() {
 
 #[test]
 fn status_chip_shows_only_that_chip() {
-    let sysfs = FakeSysfs::this_pc();
+    let sysfs = FakeSysfs::example_pc();
 
     sysfs
         .onlycurves(&["status", "--chip", "k10temp"])
@@ -189,7 +189,7 @@ fn status_chip_shows_only_that_chip() {
 
 #[test]
 fn status_chip_with_a_shared_name_asks_for_a_path() {
-    let sysfs = FakeSysfs::this_pc();
+    let sysfs = FakeSysfs::example_pc();
 
     sysfs
         .onlycurves(&["status", "--chip", "nvme"])
@@ -202,7 +202,7 @@ fn status_chip_with_a_shared_name_asks_for_a_path() {
 
 #[test]
 fn status_chip_and_path_pick_one_of_several() {
-    let sysfs = FakeSysfs::this_pc();
+    let sysfs = FakeSysfs::example_pc();
 
     sysfs
         .onlycurves(&["status", "--chip", "nvme", "--path", "nvme1"])
@@ -214,7 +214,7 @@ fn status_chip_and_path_pick_one_of_several() {
 
 #[test]
 fn status_path_needs_a_chip() {
-    let sysfs = FakeSysfs::this_pc();
+    let sysfs = FakeSysfs::example_pc();
 
     sysfs
         .onlycurves(&["status", "--path", "nvme1"])
@@ -236,7 +236,7 @@ fn status_reports_a_missing_hwmon_root() {
 
 #[test]
 fn check_accepts_the_example_config_and_shows_duties() {
-    let sysfs = FakeSysfs::this_pc();
+    let sysfs = FakeSysfs::example_pc();
     let config = sysfs.config(&example_config());
 
     sysfs
@@ -255,7 +255,7 @@ fn check_accepts_the_example_config_and_shows_duties() {
 
 #[test]
 fn check_lists_every_hardware_problem() {
-    let sysfs = FakeSysfs::this_pc();
+    let sysfs = FakeSysfs::example_pc();
     let text = example_config()
         .replace(r#"label = "junction""#, r#"label = "hotspot""#)
         .replace("pwm = 1 }", "pwm = 4 }");
@@ -276,7 +276,7 @@ fn check_lists_every_hardware_problem() {
 
 #[test]
 fn check_reports_config_errors_before_touching_hardware() {
-    let sysfs = FakeSysfs::this_pc();
+    let sysfs = FakeSysfs::example_pc();
     let text = example_config().replace("[[35, 30], [55, 55]", "[[55, 30], [35, 55]");
     let config = sysfs.config(&text);
 
@@ -291,7 +291,7 @@ fn check_reports_config_errors_before_touching_hardware() {
 
 #[test]
 fn check_reports_a_missing_config() {
-    let sysfs = FakeSysfs::this_pc();
+    let sysfs = FakeSysfs::example_pc();
 
     sysfs
         .onlycurves(&["--config", "/nonexistent/onlycurves.toml", "check"])
@@ -304,7 +304,7 @@ fn check_reports_a_missing_config() {
 
 #[test]
 fn identify_runs_the_fan_and_restores_its_output() {
-    let sysfs = FakeSysfs::this_pc();
+    let sysfs = FakeSysfs::example_pc();
     let config = sysfs.config(&example_config());
 
     sysfs
@@ -335,7 +335,7 @@ fn identify_runs_the_fan_and_restores_its_output() {
 
 #[test]
 fn identify_lists_the_fans_when_the_name_is_unknown() {
-    let sysfs = FakeSysfs::this_pc();
+    let sysfs = FakeSysfs::example_pc();
     let config = sysfs.config(&example_config());
 
     sysfs
@@ -351,7 +351,7 @@ fn identify_lists_the_fans_when_the_name_is_unknown() {
 fn identify_explains_that_writing_needs_root() {
     use std::os::unix::fs::PermissionsExt;
 
-    let sysfs = FakeSysfs::this_pc();
+    let sysfs = FakeSysfs::example_pc();
     let config = sysfs.config(&example_config());
     let pwm1_enable = sysfs.hwmon_root().join("hwmon7/pwm1_enable");
     fs::set_permissions(&pwm1_enable, fs::Permissions::from_mode(0o444)).unwrap();
@@ -386,7 +386,7 @@ fn wait_for(condition: impl Fn() -> bool) {
 
 #[test]
 fn run_drives_the_fans_and_hands_them_back_on_sigterm() {
-    let sysfs = FakeSysfs::this_pc();
+    let sysfs = FakeSysfs::example_pc();
     let config = sysfs.config(&example_config());
     let state_dir = tempfile::tempdir_in("/dev/shm").unwrap();
     let state_file = state_dir.path().join("state.json");
@@ -432,7 +432,7 @@ fn run_drives_the_fans_and_hands_them_back_on_sigterm() {
 
 #[test]
 fn run_refuses_a_state_directory_on_disk_before_touching_fans() {
-    let sysfs = FakeSysfs::this_pc();
+    let sysfs = FakeSysfs::example_pc();
     let config = sysfs.config(&example_config());
     // The root filesystem is a disk on any real system; a checkout may not be.
     let on_disk = Path::new("/");
@@ -448,7 +448,7 @@ fn run_refuses_a_state_directory_on_disk_before_touching_fans() {
 
 #[test]
 fn restore_hands_every_configured_fan_back_to_the_chip() {
-    let sysfs = FakeSysfs::this_pc();
+    let sysfs = FakeSysfs::example_pc();
     let config = sysfs.config(&example_config());
     let state_dir = tempfile::tempdir().unwrap();
 
@@ -468,7 +468,7 @@ fn restore_hands_every_configured_fan_back_to_the_chip() {
 
 #[test]
 fn restore_ignores_broken_sensors() {
-    let sysfs = FakeSysfs::this_pc();
+    let sysfs = FakeSysfs::example_pc();
     let text = example_config().replace(r#"label = "Tctl""#, r#"label = "Tcl""#);
     let config = sysfs.config(&text);
     let state_dir = tempfile::tempdir().unwrap();
@@ -482,7 +482,7 @@ fn restore_ignores_broken_sensors() {
 
 #[test]
 fn restore_uses_the_record_when_the_config_is_broken() {
-    let sysfs = FakeSysfs::this_pc();
+    let sysfs = FakeSysfs::example_pc();
     let config = sysfs.config("this is not toml");
     let state_dir = tempfile::tempdir().unwrap();
     let chip_dir = sysfs.hwmon_root().join("hwmon7");
@@ -513,7 +513,7 @@ fn restore_uses_the_record_when_the_config_is_broken() {
 
 #[test]
 fn restore_fails_without_record_or_config() {
-    let sysfs = FakeSysfs::this_pc();
+    let sysfs = FakeSysfs::example_pc();
     let config = sysfs.config("this is not toml");
     let state_dir = tempfile::tempdir().unwrap();
 
@@ -571,7 +571,7 @@ fn signal(child: &std::process::Child, name: &str) {
 
 #[test]
 fn run_talks_to_systemd_and_reloads_on_sighup() {
-    let sysfs = FakeSysfs::this_pc();
+    let sysfs = FakeSysfs::example_pc();
     let config = sysfs.config(&example_config());
     let state_dir = tempfile::tempdir_in("/dev/shm").unwrap();
     let systemd = FakeSystemd::new();

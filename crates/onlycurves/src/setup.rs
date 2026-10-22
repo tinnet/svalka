@@ -1,4 +1,4 @@
-//! Loading the config and binding it to this PC: the first step of every
+//! Loading the config and binding it to the hardware: the first step of every
 //! command that uses a config.
 
 use std::fs;
@@ -10,7 +10,7 @@ use onlycurves_core::config::{Config, ConfigError};
 use crate::binding::{self, Bindings};
 use crate::hwmon::{self, Chip};
 
-/// A valid config, tied to this PC's hardware.
+/// A valid config, tied to the hardware.
 #[derive(Debug, Clone)]
 pub struct Setup {
     pub config: Config,

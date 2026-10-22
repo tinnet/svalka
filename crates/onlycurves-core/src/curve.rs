@@ -191,7 +191,7 @@ mod tests {
         Curve::from_pairs(points.iter().copied())
     }
 
-    /// The CPU cooler curve from the design doc.
+    /// A typical CPU cooler curve.
     fn cpu_cooler() -> Curve {
         curve(&[(35.0, 30.0), (55.0, 55.0), (75.0, 90.0), (85.0, 100.0)]).unwrap()
     }

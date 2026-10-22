@@ -1,15 +1,48 @@
 # onlycurves
 
-Fan control for one PC: read temperatures, map them through piecewise-linear
-curves, write fan PWM. Replaces CoolerControl on an ASUS B550-I / Ryzen 7
-5700X3D / RX 9070 XT box. The design doc lives in Claude Docs
-("onlycurves — Design Doc").
+A small fan-control daemon for Linux: read temperatures from hwmon, map them
+through piecewise-linear curves, write fan PWM. One TOML file, one binary, no
+GUI, no API.
 
-## Status
+```toml
+[sensors]
+cpu = { chip = "k10temp", label = "Tctl" }
 
-Milestones 1–4 and 6 of 7 are done: `status`, `check`, `identify`, `run`
-(with `restore`) and the systemd service. `sweep` (5) is postponed. `status`
-and `check` are read-only and need no root; the others write to the fans.
+[fan.cpu_cooler]
+output = { chip = "nct6798", pwm = 2 }
+sources = ["cpu"]
+curve = [[35, 30], [55, 55], [75, 90], [85, 100]]   # [°C, %]
+```
+
+## Hardware
+
+- **Temperatures:** any hwmon temperature input (`k10temp`, `coretemp`,
+  `amdgpu`, `nvme`, …), chosen by chip name and input label.
+- **Fans:** PWM outputs of Super-I/O chips under the kernel's `nct6775` driver
+  (nct6106 … nct6799). On exit, onlycurves hands each output back to the
+  chip's own curve (SmartFan IV); it only takes over outputs whose driver it
+  knows how to hand back, so other chips are refused rather than left stuck.
+- Developed and tested on an nct6798 (ASUS AM4 board) with k10temp and amdgpu
+  sensors. Reports from other boards are welcome.
+
+## Install
+
+Needs Rust (see `mise.toml` for the version) and systemd.
+
+```console
+$ mise run install                       # release build; binary, unit, and /etc/onlycurves.toml if missing
+$ sudoedit /etc/onlycurves.toml          # see examples/onlycurves.toml
+$ onlycurves check                       # validate the config against your hardware
+$ sudo systemctl enable --now onlycurves
+```
+
+Stop any other fan-control daemon first: two programs writing the same PWM
+outputs fight over them.
+
+## Commands
+
+`status` and `check` are read-only and need no root; the others write to the
+fans.
 
 ### `onlycurves status`
 
@@ -36,7 +69,7 @@ nct6798 · nct6775.656 · now hwmon7
 ### `onlycurves check`
 
 Validates the config (default `/etc/onlycurves.toml`, or `--config FILE`)
-against this PC and shows the duty each fan would get right now.
+against the hardware and shows the duty each fan would get right now.
 
 ```console
 $ onlycurves --config examples/onlycurves.toml check
@@ -48,14 +81,15 @@ Sensors
 
 Fans, at the current temperatures (no smoothing or hysteresis)
   cpu_cooler  nct6798 pwm2  cpu   44.6 °C  →   42 %  107/255  now  42 %  107/255
-  exhaust     nct6798 pwm1  gpu   34.0 °C  →   33 %   85/255  now  29 %   74/255
+  exhaust     nct6798 pwm1  gpu   34.0 °C  →   30 %   77/255  now  29 %   74/255
 ```
 
-`now` is what the output is at today, i.e. what CoolerControl set. When the
-config is wrong, `check` lists every problem and exits 1. The config is
-checked first, then the hardware: chips must resolve, labels and outputs must
-exist, `AUXTIN*` inputs are refused, and every sensor must read 0–125 °C.
-[`examples/onlycurves.toml`](examples/onlycurves.toml) documents the format.
+`now` is what the output is at, set by whatever controls it at the moment.
+When the config is wrong, `check` lists every problem and exits 1. The config
+is checked first, then the hardware: chips must resolve, labels and outputs
+must exist, `AUXTIN*` inputs are refused, and every sensor must read
+0–125 °C. [`examples/onlycurves.toml`](examples/onlycurves.toml) documents the
+format.
 
 ### `sudo onlycurves identify FAN`
 
@@ -80,10 +114,9 @@ Restored nct6798 pwm1 to 98/255, automatic (5).
 fan1 rose from 931 to 1764 rpm: pwm1 drives the fan that fan1 reports.
 ```
 
-The nct6775 driver refreshes readings every 1.5–2 s, hence the pairs.
-Stop CoolerControl first (`sudo systemctl stop coolercontrold`): if another
-program writes the output during the test, `identify` stops and restores it.
-Ctrl-C and SIGTERM also restore before exiting.
+The nct6775 driver refreshes readings every 1.5–2 s, hence the pairs. If
+another program writes the output during the test, `identify` stops and
+restores it. Ctrl-C and SIGTERM also restore before exiting.
 
 ### `sudo onlycurves run`
 
@@ -96,10 +129,11 @@ it (`smoothing`), holds small drops (`hysteresis`), applies the curve and
 - A sensor that cannot be read, or jumps by more than 20 °C in one tick,
   puts its fans at `failsafe_duty` for that tick.
 - The fan outputs themselves are read back only every `readback_interval`
-  (default 10 s): on ASUS boards each read of the nct6798 goes through ACPI
-  WMI and costs ~84 ms of CPU, so reading every second would cost ~4 % of a
-  core. Duties are still written every tick; writes are cheap.
-- If the output is switched away (resume from suspend, another program), it
+  (default 10 s). On some ASUS boards the nct6775 driver reaches the chip
+  through ACPI WMI, and each read after its 1.5 s cache expires costs ~84 ms
+  of kernel CPU, so reading every second would cost ~4 % of a core. Duties
+  are still written every tick; writes are cheap.
+- If an output is switched away (resume from suspend, another program), it
   logs that once and takes it back at the next readback.
 - A fan reading 0 rpm at 30 % or more for about 5 s (at least two readbacks
   in a row) is logged as stalled.
@@ -118,24 +152,20 @@ config. The record is what counts: the config on disk may have been edited or
 broken since `run` read it, so it is only required when there is no record.
 Sensors are never checked, so a broken sensor cannot block it.
 
-### As a systemd service
+## As a systemd service
 
 ```console
-$ mise run install                       # binary, unit, and /etc/onlycurves.toml if missing
-$ sudo systemctl disable --now coolercontrold
-$ sudo systemctl enable --now onlycurves
 $ systemctl status onlycurves            # Status: line shows each fan's duty and driver
 $ sudo systemctl reload onlycurves       # after editing /etc/onlycurves.toml
 $ journalctl -u onlycurves -f
 ```
 
 [`dist/onlycurves.service`](dist/onlycurves.service) runs `onlycurves run` as
-`Type=notify`: it reports ready after the first tick, pets a 10 s watchdog
-every tick, and shows each fan's duty as its status. `systemctl reload` sends
-SIGHUP: the new config is checked against the hardware first, and if it fails
-the running one stays (see the journal). `ExecStopPost` runs `restore` after
-every stop, so the fans go back to the chip's own curve even after `kill -9`.
-`Conflicts=coolercontrold.service` keeps the two from fighting.
+`Type=notify`: it reports ready after the first tick, pets a 10 s watchdog,
+and shows each fan's duty as its status. `systemctl reload` sends SIGHUP: the
+new config is checked against the hardware first, and if it fails the running
+one stays (see the journal). `ExecStopPost` runs `restore` after every stop,
+so the fans go back to the chip's own curve even after `kill -9`.
 
 ## Developing
 
@@ -151,10 +181,12 @@ Toolchain and tasks come from [mise](https://mise.jdx.dev/):
 | `mise run check` | `check` with `examples/onlycurves.toml` |
 | `mise run install` | Release build, then install binary + unit (sudo) |
 
+Tests run against a fake sysfs tree, so they need no special hardware or root.
+
 ## Layout
 
 ```text
-crates/onlycurves-core/     no hardware access; shared with the later TUI
+crates/onlycurves-core/     no hardware access
   src/curve.rs              piecewise-linear curves and their rules
   src/config.rs             parsing and validating the TOML config
   src/duration.rs           "8s" / "500ms" values
@@ -166,7 +198,9 @@ crates/onlycurves/          the daemon and CLI (library + thin main.rs)
   src/hwmon.rs              chip discovery and identity (name + device path)
   src/hwmon/sensors.rs      reading temperatures, fans, PWM
   src/hwmon/resolve.rs      picking one chip by name and path
+  src/hwmon/control.rs      manual PWM control that always hands back
   src/binding.rs            tying config sensors and fans to real inputs/outputs
+  src/setup.rs              load config + bind, shared by commands
   src/status.rs             the `status` command
   src/check.rs              the `check` command
   src/identify.rs           the `identify` command
@@ -174,18 +208,15 @@ crates/onlycurves/          the daemon and CLI (library + thin main.rs)
   src/restore.rs            the `restore` command
   src/record.rs             /run/onlycurves/outputs: what run holds, for restore
   src/statefile.rs          state.json, tmpfs only, atomic writes
+  src/files.rs              atomic write, remove-if-present
   src/log.rs                stderr logging, journald priorities under systemd
   src/notify.rs             sd_notify: READY, STATUS, WATCHDOG, RELOADING
-  src/setup.rs              load config + bind, shared by commands
   src/signals.rs            SIGINT/SIGTERM -> stop, SIGHUP -> reload
-  src/hwmon/control.rs      manual PWM control that always restores
   src/sysfs.rs              reading one-value sysfs files
   tests/cli.rs              runs the binary against a fake sysfs tree
-examples/onlycurves.toml    the config for this PC
+examples/onlycurves.toml    an annotated example config
 dist/onlycurves.service     the systemd unit
 ```
-
-`onlycurves-tui` joins the workspace later.
 
 ## License
 

@@ -15,7 +15,7 @@ use anyhow::Context;
 use crate::hwmon::{self, Chip, HandBack, ManualOverride, PwmEnable};
 
 /// Labels of inputs that are often unconnected on consumer boards and then
-/// report garbage, such as AUXTIN0 at 84 °C on the B550-I.
+/// report garbage, such as an AUXTIN reading 84 °C with nothing attached.
 const FLOATING_LABEL_PREFIX: &str = "AUXTIN";
 
 /// A config sensor tied to one temperature input.
@@ -67,7 +67,8 @@ impl BoundOutput {
     }
 
     /// The fan's speed from the tachometer with the same number (`fanN` for
-    /// `pwmN`, as `identify` confirmed on this board), or `None` without one.
+    /// `pwmN`, as on nct6775-family boards; `identify` shows the pairing), or
+    /// `None` without one.
     ///
     /// # Errors
     ///
@@ -291,8 +292,8 @@ mod tests {
     use super::*;
     use crate::hwmon::{discover, testing::FakeSysfs};
 
-    /// This PC's chips, as far as the config below needs them.
-    fn this_pc() -> FakeSysfs {
+    /// A fake PC's chips, as far as the config below needs them.
+    fn example_pc() -> FakeSysfs {
         let sysfs = FakeSysfs::new();
         sysfs
             .chip("hwmon3", "k10temp", "pci0000:00/0000:00:18.3")
@@ -331,7 +332,7 @@ curve   = [[35, 30], [85, 100]]
 
     #[test]
     fn binds_sensors_and_outputs() {
-        let sysfs = this_pc();
+        let sysfs = example_pc();
         let chips = discover(&sysfs.hwmon_root()).unwrap();
         let config = config(r#"cpu = { chip = "k10temp", label = "Tctl" }"#, CPU_FAN);
 
@@ -347,7 +348,7 @@ curve   = [[35, 30], [85, 100]]
 
     #[test]
     fn reports_unknown_chips_labels_and_outputs() {
-        let sysfs = this_pc();
+        let sysfs = example_pc();
         let config = config(
             r#"
 cpu = { chip = "k10temp", label = "Tcl" }
@@ -368,7 +369,7 @@ gpu = { chip = "radeon", label = "junction" }
 
     #[test]
     fn two_spellings_of_one_output_are_one_output() {
-        let sysfs = this_pc();
+        let sysfs = example_pc();
         let second_fan = CPU_FAN.replace("[fan.cpu_cooler]", "[fan.copy]").replace(
             r#"chip = "nct6798", pwm = 2"#,
             r#"chip = "nct6798", path = "nct6775.656", pwm = 2"#,
@@ -386,7 +387,7 @@ gpu = { chip = "radeon", label = "junction" }
 
     #[test]
     fn rejects_floating_and_implausible_inputs() {
-        let sysfs = this_pc();
+        let sysfs = example_pc();
         let config = config(
             r#"
 cpu   = { chip = "k10temp", label = "Tctl" }

@@ -32,7 +32,7 @@ struct Cli {
 enum Command {
     /// Print every temperature, fan speed and PWM duty (read-only)
     Status(StatusArgs),
-    /// Validate the config against this PC and show each fan's duty right now (read-only)
+    /// Validate the config against the hardware and show each fan's duty right now (read-only)
     Check,
     /// Run one fan at 100 % for a few seconds, then restore it (needs root)
     Identify(IdentifyArgs),

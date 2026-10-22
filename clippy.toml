@@ -1,2 +1,2 @@
 # Hardware and product names that pedantic doc_markdown would otherwise want in backticks.
-doc-valid-idents = ["SmartFan", "NVMe", "CoolerControl", "TOML", ".."]
+doc-valid-idents = ["SmartFan", "NVMe", "TOML", ".."]

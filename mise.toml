@@ -33,7 +33,7 @@ description = "Show every temperature, fan and PWM"
 
 [tasks.check]
 run = "cargo run --quiet -- --config examples/onlycurves.toml check"
-description = "Check the example config against this PC"
+description = "Check the example config against this machine"
 
 [tasks.install]
 description = "Install the binary and systemd unit (sudo); keeps an existing /etc/onlycurves.toml"

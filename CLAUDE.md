@@ -2,9 +2,8 @@
 
 ## Project
 
-onlycurves: a fan-control daemon + CLI for one Linux PC, in Rust. The design
-doc (Claude Docs, "onlycurves — Design Doc") is the source of truth for scope
-and milestones; the README says which milestone is done.
+onlycurves: a fan-control daemon + CLI for Linux, in Rust. The README
+describes what it does and for which hardware.
 
 ## Commands
 

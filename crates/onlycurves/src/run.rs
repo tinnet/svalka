@@ -591,7 +591,7 @@ impl FanLoop {
         match self.interference.observe(interfered) {
             Some(Edge::Began) => log::warning(format!(
                 "{}: {} changed to {found} behind our back (resume from suspend, or another \
-                 program such as CoolerControl); taking it back",
+                 fan-control program); taking it back",
                 self.name, self.description
             )),
             Some(Edge::Ended) => {

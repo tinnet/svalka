@@ -1,6 +1,6 @@
 //! The per-fan control logic of one loop tick, without any I/O.
 //!
-//! Each tick, for each fan (see the design doc's Architecture section):
+//! Each tick, for each fan:
 //! 1. take the hottest of the fan's source temperatures,
 //! 2. smooth it with an exponential moving average,
 //! 3. apply hysteresis: while it falls, ignore drops smaller than `hysteresis`,

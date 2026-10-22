@@ -292,8 +292,8 @@ fn check_sources(
 mod tests {
     use super::*;
 
-    /// The config from the design doc.
-    const DESIGN_DOC: &str = r#"
+    /// A complete config: two fans on an nct6798.
+    const EXAMPLE: &str = r#"
 interval = "1s"          # control loop period
 failsafe_duty = 100       # % used when any input sensor fails to read
 
@@ -325,8 +325,8 @@ hysteresis = 2.0
     }
 
     #[test]
-    fn parses_the_design_doc_config() {
-        let config = Config::parse(DESIGN_DOC).unwrap();
+    fn parses_the_example_config() {
+        let config = Config::parse(EXAMPLE).unwrap();
 
         assert_eq!(config.interval, Duration::from_secs(1));
         assert_eq!(config.sensors["cpu"].label, "Tctl");
@@ -346,8 +346,7 @@ hysteresis = 2.0
 
     #[test]
     fn fan_duty_never_goes_below_min_duty() {
-        let config =
-            Config::parse(&DESIGN_DOC.replace("min_duty   = 20", "min_duty   = 40")).unwrap();
+        let config = Config::parse(&EXAMPLE.replace("min_duty   = 20", "min_duty   = 40")).unwrap();
         let cooler = &config.fans["cpu_cooler"];
 
         assert!((cooler.duty_at(20.0) - 40.0).abs() < 1e-9); // curve says 30 %
@@ -356,7 +355,7 @@ hysteresis = 2.0
 
     #[test]
     fn unknown_keys_are_syntax_errors() {
-        let error = Config::parse(&DESIGN_DOC.replace("hysteresis = 2.0  ", "hysteresys = 2.0  "))
+        let error = Config::parse(&EXAMPLE.replace("hysteresis = 2.0  ", "hysteresys = 2.0  "))
             .unwrap_err();
 
         assert!(
@@ -367,7 +366,7 @@ hysteresis = 2.0
 
     #[test]
     fn reports_every_problem_at_once() {
-        let text = DESIGN_DOC
+        let text = EXAMPLE
             .replace(r#"sources    = ["gpu"]"#, r#"sources    = ["gpuu"]"#)
             .replace("[[35, 30], [55, 55]", "[[55, 30], [35, 55]")
             .replace("failsafe_duty = 100", "failsafe_duty = 120");
@@ -384,7 +383,7 @@ hysteresis = 2.0
 
     #[test]
     fn rejects_bad_fan_settings() {
-        let text = DESIGN_DOC
+        let text = EXAMPLE
             .replace(r#"sources    = ["cpu"] "#, "sources    = [] ")
             .replace("min_duty   = 20", "min_duty   = -5")
             .replace(
@@ -412,7 +411,7 @@ hysteresis = 2.0
 
     #[test]
     fn interval_must_not_be_zero() {
-        let text = DESIGN_DOC.replace(r#"interval = "1s""#, r#"interval = "0s""#);
+        let text = EXAMPLE.replace(r#"interval = "1s""#, r#"interval = "0s""#);
 
         assert_eq!(problems(&text), ["interval must be longer than 0s"]);
     }
@@ -420,11 +419,11 @@ hysteresis = 2.0
     #[test]
     fn readback_interval_defaults_to_ten_seconds_and_must_not_be_zero() {
         assert_eq!(
-            Config::parse(DESIGN_DOC).unwrap().readback_interval,
+            Config::parse(EXAMPLE).unwrap().readback_interval,
             Duration::from_secs(10)
         );
 
-        let text = format!("readback_interval = \"0s\"\n{DESIGN_DOC}");
+        let text = format!("readback_interval = \"0s\"\n{EXAMPLE}");
         assert_eq!(
             problems(&text),
             ["readback_interval must be longer than 0s"]
@@ -434,7 +433,7 @@ hysteresis = 2.0
     #[test]
     fn bad_durations_are_syntax_errors() {
         let error =
-            Config::parse(&DESIGN_DOC.replace(r#"smoothing  = "8s"  "#, r#"smoothing  = "8"  "#))
+            Config::parse(&EXAMPLE.replace(r#"smoothing  = "8s"  "#, r#"smoothing  = "8"  "#))
                 .unwrap_err();
 
         assert!(
