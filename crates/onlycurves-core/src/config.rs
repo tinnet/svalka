@@ -12,6 +12,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
+use crate::controller::FanController;
 use crate::curve::{Curve, is_percent};
 use crate::duration;
 
@@ -112,6 +113,12 @@ impl fmt::Display for ConfigError {
 impl std::error::Error for ConfigError {}
 
 impl Config {
+    /// A controller for `fan`, ticking at this config's interval.
+    #[must_use]
+    pub fn controller(&self, fan: &Fan) -> FanController {
+        FanController::new(fan.clone(), self.interval, self.failsafe_duty)
+    }
+
     /// Parses and validates the text of a config file.
     ///
     /// # Errors

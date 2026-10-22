@@ -34,10 +34,10 @@ pub struct Options<'a> {
 
 /// One tachometer's speed before the test and its highest speed during it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RpmChange {
-    pub label: String,
-    pub before: Option<u32>,
-    pub peak: Option<u32>,
+struct RpmChange {
+    label: String,
+    before: Option<u32>,
+    peak: Option<u32>,
 }
 
 /// Why the hold ended.
@@ -213,7 +213,7 @@ fn print_rpm_row(
 
 /// Which tachometer rose the most, if any rose enough to count.
 #[must_use]
-pub fn verdict(changes: &[RpmChange], pwm: u32) -> String {
+fn verdict(changes: &[RpmChange], pwm: u32) -> String {
     let biggest = changes
         .iter()
         .filter_map(|change| Some((change, change.before?, change.peak?)))

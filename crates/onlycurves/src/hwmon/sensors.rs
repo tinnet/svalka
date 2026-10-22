@@ -7,8 +7,6 @@ use std::fmt;
 use std::fs;
 use std::io;
 
-use onlycurves_core::pwm;
-
 use super::Chip;
 use crate::sysfs;
 
@@ -36,13 +34,6 @@ pub struct Pwm {
     pub duty: Option<u8>,
     /// `None` when the chip has no `pwmN_enable` or it could not be read.
     pub enable: Option<PwmEnable>,
-}
-
-impl Pwm {
-    /// The duty as a percentage, rounded to the nearest whole percent.
-    pub fn duty_percent(&self) -> Option<u8> {
-        self.duty.map(pwm::raw_to_percent)
-    }
 }
 
 /// Who controls a PWM output, from `pwmN_enable`.
@@ -355,20 +346,6 @@ mod tests {
 
         assert_eq!(chip.read_temps().unwrap()[0].celsius, None);
         assert_eq!(chip.read_pwms().unwrap()[0].enable, None);
-    }
-
-    #[test]
-    fn duty_percent_rounds_to_nearest() {
-        let pwm = |duty| Pwm {
-            label: "pwm1".into(),
-            duty: Some(duty),
-            enable: None,
-        };
-
-        assert_eq!(pwm(0).duty_percent(), Some(0));
-        assert_eq!(pwm(102).duty_percent(), Some(40));
-        assert_eq!(pwm(120).duty_percent(), Some(47));
-        assert_eq!(pwm(255).duty_percent(), Some(100));
     }
 
     #[test]

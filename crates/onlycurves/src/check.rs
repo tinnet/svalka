@@ -1,46 +1,42 @@
 //! The `check` command: validate the config against the hardware and show the
 //! duty each fan would get right now.
 
-use std::collections::BTreeMap;
 use std::path::Path;
 
-use anyhow::{Context, anyhow};
-use onlycurves_core::config::Config;
-use onlycurves_core::controller::hottest;
+use anyhow::Context;
+use onlycurves_core::controller::Tick;
 use onlycurves_core::pwm;
 
-use crate::binding::Bindings;
+use crate::binding;
 use crate::setup::Setup;
 
 /// One sensor's reading.
 #[derive(Debug, Clone, PartialEq)]
-pub struct SensorReading {
-    pub name: String,
+struct SensorReading {
+    name: String,
     /// E.g. `k10temp Tctl`.
-    pub input: String,
-    pub celsius: f64,
+    input: String,
+    /// `None` when unreadable.
+    celsius: Option<f64>,
 }
 
 /// What one fan would do at the current temperatures.
 #[derive(Debug, Clone, PartialEq)]
-pub struct FanReading {
-    pub name: String,
+struct FanReading {
+    name: String,
     /// E.g. `nct6798 pwm2`.
-    pub output: String,
-    /// The hottest of the fan's sources, which drives it.
-    pub source: String,
-    pub celsius: f64,
-    /// Duty in percent from the curve and `min_duty`.
-    pub duty: f64,
+    output: String,
+    /// The first tick a fresh controller runs, as `run` would at startup.
+    tick: Tick,
     /// Raw duty the output is at now, set by whoever controls it today.
-    pub current_raw: u8,
+    current_raw: u8,
 }
 
 /// Everything `check` prints after the config passed.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Report {
-    pub sensors: Vec<SensorReading>,
-    pub fans: Vec<FanReading>,
+struct Report {
+    sensors: Vec<SensorReading>,
+    fans: Vec<FanReading>,
 }
 
 /// Loads `config_path`, checks it against the chips under `hwmon_root` and
@@ -49,51 +45,36 @@ pub struct Report {
 /// # Errors
 ///
 /// Fails when the file cannot be read, the config is invalid, it does not
-/// match the hardware, or a sensor or output cannot be read.
+/// match the hardware, or an output cannot be read.
 pub fn run(config_path: &Path, hwmon_root: &Path) -> anyhow::Result<String> {
     let setup = Setup::load(config_path, hwmon_root)?;
-    let report = read_report(&setup.config, &setup.bindings)?;
+    let report = read_report(&setup)?;
     Ok(render(config_path, &report))
 }
 
-/// Reads every sensor once and works out each fan's duty from those readings.
-///
-/// # Errors
-///
-/// Fails when a sensor or output cannot be read.
-pub fn read_report(config: &Config, bindings: &Bindings) -> anyhow::Result<Report> {
-    let mut sensors = Vec::new();
-    for (name, sensor) in &bindings.sensors {
-        let celsius = sensor
-            .read_celsius()
-            .with_context(|| format!("cannot read sensor {name} ({})", sensor.describe()))?;
-        sensors.push(SensorReading {
+/// Reads every sensor once and runs each fan's controller for one tick on
+/// those readings, exactly as `run`'s first tick would.
+fn read_report(setup: &Setup) -> anyhow::Result<Report> {
+    let readings = binding::read_sensors(&setup.bindings.sensors);
+    let sensors = setup
+        .bindings
+        .sensors
+        .iter()
+        .map(|(name, sensor)| SensorReading {
             name: name.clone(),
             input: sensor.describe(),
-            celsius,
-        });
-    }
-    let temperatures: BTreeMap<&str, f64> = sensors
-        .iter()
-        .map(|reading| (reading.name.as_str(), reading.celsius))
+            celsius: readings[name],
+        })
         .collect();
 
     let mut fans = Vec::new();
-    for (name, fan) in &config.fans {
+    for (name, fan) in &setup.config.fans {
         // `bind` succeeded, so every fan has an output.
-        let output = &bindings.outputs[name];
-        let readings = fan
-            .sources
-            .iter()
-            .filter_map(|source| Some((source.as_str(), *temperatures.get(source.as_str())?)));
-        let (source, celsius) =
-            hottest(readings).ok_or_else(|| anyhow!("fan {name} has no readable sources"))?;
+        let output = &setup.bindings.outputs[name];
         fans.push(FanReading {
             name: name.clone(),
             output: output.describe(),
-            source: source.to_owned(),
-            celsius,
-            duty: fan.duty_at(celsius),
+            tick: setup.config.controller(fan).tick(&readings),
             current_raw: output
                 .read_raw()
                 .with_context(|| format!("cannot read {}", output.describe()))?,
@@ -103,8 +84,7 @@ pub fn read_report(config: &Config, bindings: &Bindings) -> anyhow::Result<Repor
 }
 
 /// Renders the report under a line saying the config is valid.
-#[must_use]
-pub fn render(config_path: &Path, report: &Report) -> String {
+fn render(config_path: &Path, report: &Report) -> String {
     let sensor_rows: Vec<Vec<String>> = report.sensors.iter().map(sensor_row).collect();
     let fan_rows: Vec<Vec<String>> = report.fans.iter().map(fan_row).collect();
     format!(
@@ -117,22 +97,29 @@ pub fn render(config_path: &Path, report: &Report) -> String {
 
 /// E.g. `cpu  k10temp Tctl  49.1 °C`.
 fn sensor_row(sensor: &SensorReading) -> Vec<String> {
-    vec![
-        sensor.name.clone(),
-        sensor.input.clone(),
-        format!("{:>5.1} °C", sensor.celsius),
-    ]
+    let reading = sensor.celsius.map_or_else(
+        || "unreadable".to_owned(),
+        |celsius| format!("{celsius:>5.1} °C"),
+    );
+    vec![sensor.name.clone(), sensor.input.clone(), reading]
 }
 
-/// E.g. `cpu_cooler  nct6798 pwm2  cpu  49.1 °C  →   44 %  112/255  now  47 %  120/255`.
+/// E.g. `cpu_cooler  nct6798 pwm2  cpu   49.1 °C  →   48 %  122/255  now  47 %  120/255`,
+/// or with `failsafe  sensor gpu cannot be read  →` in place of source and °C.
 fn fan_row(fan: &FanReading) -> Vec<String> {
-    let raw = pwm::percent_to_raw(fan.duty);
+    let tick = &fan.tick;
+    let (source, reason) = match (&tick.hottest, &tick.failsafe) {
+        (_, Some(failsafe)) => ("failsafe".to_owned(), format!("{failsafe}  →")),
+        (Some((source, celsius)), None) => (source.clone(), format!("{celsius:>5.1} °C  →")),
+        (None, None) => (String::new(), "→".to_owned()),
+    };
+    let raw = pwm::percent_to_raw(tick.duty);
     vec![
         fan.name.clone(),
         fan.output.clone(),
-        fan.source.clone(),
-        format!("{:>5.1} °C  →", fan.celsius),
-        format!("{:>3.0} %  {raw:>3}/255", fan.duty),
+        source,
+        reason,
+        format!("{:>3.0} %  {raw:>3}/255", tick.duty),
         format!(
             "now {:>3} %  {:>3}/255",
             pwm::raw_to_percent(fan.current_raw),
@@ -170,39 +157,51 @@ fn align_columns(rows: &[Vec<String>]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use onlycurves_core::controller::Failsafe;
+
     use super::*;
+
+    fn sensor(name: &str, input: &str, celsius: Option<f64>) -> SensorReading {
+        SensorReading {
+            name: name.into(),
+            input: input.into(),
+            celsius,
+        }
+    }
+
+    fn fan(name: &str, output: &str, tick: Tick, current_raw: u8) -> FanReading {
+        FanReading {
+            name: name.into(),
+            output: output.into(),
+            tick,
+            current_raw,
+        }
+    }
+
+    fn normal(source: &str, celsius: f64, duty: f64) -> Tick {
+        Tick {
+            duty,
+            hottest: Some((source.into(), celsius)),
+            smoothed: Some(celsius),
+            effective: Some(celsius),
+            failsafe: None,
+        }
+    }
 
     fn report() -> Report {
         Report {
             sensors: vec![
-                SensorReading {
-                    name: "cpu".into(),
-                    input: "k10temp Tctl".into(),
-                    celsius: 49.125,
-                },
-                SensorReading {
-                    name: "gpu".into(),
-                    input: "amdgpu junction".into(),
-                    celsius: 47.0,
-                },
+                sensor("cpu", "k10temp Tctl", Some(49.125)),
+                sensor("gpu", "amdgpu junction", Some(47.0)),
             ],
             fans: vec![
-                FanReading {
-                    name: "cpu_cooler".into(),
-                    output: "nct6798 pwm2".into(),
-                    source: "cpu".into(),
-                    celsius: 49.125,
-                    duty: 47.656_25,
-                    current_raw: 120,
-                },
-                FanReading {
-                    name: "exhaust".into(),
-                    output: "nct6798 pwm1".into(),
-                    source: "gpu".into(),
-                    celsius: 47.0,
-                    duty: 47.0,
-                    current_raw: 102,
-                },
+                fan(
+                    "cpu_cooler",
+                    "nct6798 pwm2",
+                    normal("cpu", 49.125, 47.656_25),
+                    120,
+                ),
+                fan("exhaust", "nct6798 pwm1", normal("gpu", 47.0, 47.0), 102),
             ],
         }
     }
@@ -223,6 +222,40 @@ Fans, at the current temperatures (no smoothing or hysteresis)
         assert_eq!(
             render(Path::new("/etc/onlycurves.toml"), &report()),
             expected
+        );
+    }
+
+    #[test]
+    fn an_unreadable_sensor_shows_as_failsafe() {
+        let report = Report {
+            sensors: vec![sensor("gpu", "amdgpu junction", None)],
+            fans: vec![fan(
+                "exhaust",
+                "nct6798 pwm1",
+                Tick {
+                    duty: 100.0,
+                    hottest: None,
+                    smoothed: None,
+                    effective: None,
+                    failsafe: Some(Failsafe::Unreadable {
+                        source: "gpu".into(),
+                    }),
+                },
+                102,
+            )],
+        };
+
+        let text = render(Path::new("x.toml"), &report);
+
+        assert!(
+            text.contains("  gpu  amdgpu junction  unreadable\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "exhaust  nct6798 pwm1  failsafe  sensor gpu cannot be read  →  100 %  255/255"
+            ),
+            "{text}"
         );
     }
 

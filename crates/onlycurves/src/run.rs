@@ -15,7 +15,6 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, bail};
-use onlycurves_core::config::{Config, Fan};
 use onlycurves_core::controller::{FanController, Tick};
 use onlycurves_core::pwm;
 use onlycurves_core::state::{FanMode, FanSnapshot, Snapshot, VERSION};
@@ -247,7 +246,7 @@ impl<'a> Daemon<'a> {
         let mut old = mem::take(&mut self.fans);
         for (name, fan) in &setup.config.fans {
             let output = setup.bindings.outputs[name].clone();
-            let controller = controller_for(&setup.config, fan);
+            let controller = setup.config.controller(fan);
             let fan_loop = if let Some(manual) = taken.remove(name) {
                 FanLoop::new(name, output, manual, controller)
             } else {
@@ -363,10 +362,6 @@ struct FanLoop {
     stall: Episode,
     /// Reading or writing the output failing, tick after tick.
     output_errors: Episode,
-}
-
-fn controller_for(config: &Config, fan: &Fan) -> FanController {
-    FanController::new(fan.clone(), config.interval, config.failsafe_duty)
 }
 
 /// Switches `output` to manual, to be handed back to the chip's automatic mode.

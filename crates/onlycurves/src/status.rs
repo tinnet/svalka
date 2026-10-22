@@ -4,6 +4,7 @@ use std::fmt::Write;
 use std::path::Path;
 
 use anyhow::Context;
+use onlycurves_core::pwm;
 
 use crate::hwmon::{self, Chip, ChipSnapshot, Fan, Pwm, Temp};
 use crate::setup;
@@ -59,29 +60,22 @@ pub fn render(snapshots: &[ChipSnapshot]) -> String {
 
 fn render_chip(chip: &ChipSnapshot) -> String {
     let width = label_width(chip);
-    let mut out = chip_heading(chip);
-    if !chip.temps.is_empty() {
-        out += &section(
+    chip_heading(chip)
+        + &section(
             "Temperatures",
             &chip.temps,
             width,
             |temp| &temp.label,
             temp_value,
-        );
-    }
-    if !chip.fans.is_empty() {
-        out += &section("Fans", &chip.fans, width, |fan| &fan.label, fan_value);
-    }
-    if !chip.pwms.is_empty() {
-        out += &section(
+        )
+        + &section("Fans", &chip.fans, width, |fan| &fan.label, fan_value)
+        + &section(
             "PWM outputs",
             &chip.pwms,
             width,
             |pwm| &pwm.label,
             pwm_value,
-        );
-    }
-    out
+        )
 }
 
 /// The longest label of any sensor on the chip, so all its values line up.
@@ -103,7 +97,8 @@ fn chip_heading(chip: &ChipSnapshot) -> String {
     format!("{} · {device} · now {}\n", chip.name, chip.hwmon_number)
 }
 
-/// A titled list of `label  value` lines, labels padded to `width`.
+/// A titled list of `label  value` lines, labels padded to `width`; nothing
+/// at all for an empty list.
 fn section<T>(
     title: &str,
     items: &[T],
@@ -111,6 +106,9 @@ fn section<T>(
     label: impl Fn(&T) -> &str,
     value: impl Fn(&T) -> String,
 ) -> String {
+    if items.is_empty() {
+        return String::new();
+    }
     let mut out = format!("  {title}\n");
     for item in items {
         writeln!(out, "    {:<width$}  {}", label(item), value(item))
@@ -137,10 +135,10 @@ fn fan_value(fan: &Fan) -> String {
 
 /// E.g. `102/255   40 %   manual (1)`.
 fn pwm_value(pwm: &Pwm) -> String {
-    let duty = match (pwm.duty, pwm.duty_percent()) {
-        (Some(raw), Some(percent)) => format!("{raw:>3}/255  {percent:>3} %"),
-        _ => UNREADABLE.to_owned(),
-    };
+    let duty = pwm.duty.map_or_else(
+        || UNREADABLE.to_owned(),
+        |raw| format!("{raw:>3}/255  {:>3} %", pwm::raw_to_percent(raw)),
+    );
     match pwm.enable {
         Some(enable) => format!("{duty}   {enable}"),
         None => duty,

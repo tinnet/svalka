@@ -180,12 +180,6 @@ impl FanController {
     }
 }
 
-/// The hottest of `(source, °C)` readings, or `None` when there are none.
-/// The rule every fan follows: several sources, the hottest one wins.
-pub fn hottest<'a>(readings: impl IntoIterator<Item = (&'a str, f64)>) -> Option<(&'a str, f64)> {
-    readings.into_iter().max_by(|a, b| a.1.total_cmp(&b.1))
-}
-
 /// alpha = interval / smoothing, capped at 1. No smoothing means alpha = 1:
 /// every reading replaces the average.
 fn smoothing_weight(interval: Duration, smoothing: Duration) -> f64 {
@@ -319,12 +313,6 @@ hysteresis = 2.0
         let failsafe = fan.tick(&readings(None, Some(0.0)));
 
         assert_close(failsafe.smoothed, 50.0);
-    }
-
-    #[test]
-    fn hottest_picks_the_highest_reading() {
-        assert_eq!(hottest([("cpu", 49.0), ("gpu", 63.5)]), Some(("gpu", 63.5)));
-        assert_eq!(hottest([]), None);
     }
 
     #[test]
