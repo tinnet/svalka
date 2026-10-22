@@ -403,6 +403,10 @@ fn run_drives_the_fans_and_hands_them_back_on_sigterm() {
     );
     assert_eq!(nct6798_attribute(&sysfs, "pwm1_enable"), "5");
     assert_eq!(nct6798_attribute(&sysfs, "pwm2_enable"), "5");
+    assert!(
+        !state_file.exists(),
+        "a stopped daemon leaves no state behind"
+    );
 }
 
 #[test]

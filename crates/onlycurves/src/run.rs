@@ -62,6 +62,12 @@ pub fn run(
 
     let result = control_loop(&setup, &mut fans, &state_file, stop);
     hand_back_all(fans);
+    if let Err(error) = state_file.remove() {
+        log::error(format!(
+            "cannot remove {}: {error}",
+            state_file.path().display()
+        ));
+    }
     result
 }
 

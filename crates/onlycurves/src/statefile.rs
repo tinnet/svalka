@@ -62,6 +62,19 @@ impl StateFile {
         fs::write(&temp, json)?;
         fs::rename(&temp, self.path())
     }
+
+    /// Deletes the state file, so a stopped daemon leaves no stale state
+    /// behind. A file that is already gone is fine.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the file exists but cannot be deleted.
+    pub fn remove(&self) -> io::Result<()> {
+        match fs::remove_file(self.path()) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            other => other,
+        }
+    }
 }
 
 /// The type of the filesystem `path` (absolute, resolved) is on, from the text
@@ -143,6 +156,10 @@ mod tests {
         let text = fs::read_to_string(state.path()).unwrap();
         assert_eq!(Snapshot::from_json(&text).unwrap(), snapshot);
         assert!(!state.dir.join(TEMP_NAME).exists());
+
+        state.remove().unwrap();
+        assert!(!state.path().exists());
+        state.remove().unwrap(); // already gone is fine
     }
 
     #[test]
