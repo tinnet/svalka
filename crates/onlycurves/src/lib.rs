@@ -6,5 +6,6 @@
 pub mod binding;
 pub mod check;
 pub mod hwmon;
+pub mod setup;
 pub mod status;
 mod sysfs;

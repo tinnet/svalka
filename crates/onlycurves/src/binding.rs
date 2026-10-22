@@ -63,6 +63,18 @@ impl BoundOutput {
     pub fn describe(&self) -> String {
         format!("{} pwm{}", self.chip.name(), self.pwm)
     }
+
+    /// The chip the output belongs to.
+    #[must_use]
+    pub fn chip(&self) -> &Chip {
+        &self.chip
+    }
+
+    /// N in `pwmN`.
+    #[must_use]
+    pub fn pwm(&self) -> u32 {
+        self.pwm
+    }
 }
 
 /// Every sensor and fan output of a config, tied to hardware.
