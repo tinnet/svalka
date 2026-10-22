@@ -111,19 +111,16 @@ impl ManualOverride {
         self.chip.write_pwm(self.pwm, raw)
     }
 
-    /// Whether the output still holds `raw` in manual mode, i.e. nothing else
-    /// has written to it since we did.
+    /// Reads the output's duty and mode as they are now.
     ///
     /// # Errors
     ///
     /// Fails when the output cannot be read.
-    pub fn still_holds(&self, raw: u8) -> io::Result<bool> {
-        let duty_kept = self.chip.read_pwm(self.pwm)? == raw;
-        let mode_kept = match self.saved.enable {
-            Some(_) => self.chip.read_pwm_enable(self.pwm)? == Some(MANUAL),
-            None => true,
-        };
-        Ok(duty_kept && mode_kept)
+    pub fn current(&self) -> io::Result<PwmState> {
+        Ok(PwmState {
+            raw: self.chip.read_pwm(self.pwm)?,
+            enable: self.chip.read_pwm_enable(self.pwm)?,
+        })
     }
 
     /// Writes the saved duty and mode back.
@@ -161,6 +158,24 @@ impl Drop for ManualOverride {
     }
 }
 
+/// Whether `state` is still what we set: duty `raw` in manual mode, i.e.
+/// nothing else has written to the output since we did.
+///
+/// The nct6775 driver family reports a manual output at exactly 255 as
+/// `pwmN_enable = 0` (full speed), so at 255 both 0 and 1 mean manual.
+#[must_use]
+pub fn is_held(state: PwmState, raw: u8) -> bool {
+    let manual = match state.enable {
+        None | Some(MANUAL) => true,
+        Some(FULL_SPEED) => raw == u8::MAX,
+        Some(_) => false,
+    };
+    state.raw == raw && manual
+}
+
+/// `pwmN_enable` value for "no control, full speed".
+const FULL_SPEED: u8 = 0;
+
 /// `pwmN_enable` value for manual control.
 const MANUAL: u8 = 1;
 
@@ -197,7 +212,7 @@ mod tests {
                 enable: Some(1)
             }
         );
-        assert!(manual.still_holds(255).unwrap());
+        assert!(is_held(manual.current().unwrap(), 255));
 
         manual.restore().unwrap();
         assert_eq!(
@@ -229,15 +244,33 @@ mod tests {
     }
 
     #[test]
-    fn still_holds_notices_other_writers() {
-        let sysfs = FakeSysfs::new();
-        let chip = nct6798(&sysfs, 1);
-        let manual = ManualOverride::take(&chip, 1).unwrap();
-        manual.set(255).unwrap();
+    fn is_held_notices_other_writers() {
+        let state = |raw, enable| PwmState {
+            raw,
+            enable: Some(enable),
+        };
 
-        chip.write_pwm(1, 120).unwrap(); // another program steps in
+        assert!(is_held(state(120, 1), 120));
+        assert!(!is_held(state(98, 1), 120)); // duty changed
+        assert!(!is_held(state(120, 5), 120)); // chip took control back
+    }
 
-        assert!(!manual.still_holds(255).unwrap());
+    #[test]
+    fn is_held_accepts_full_speed_at_255() {
+        // nct6775 reports manual mode at 255 as pwmN_enable = 0.
+        let full = PwmState {
+            raw: 255,
+            enable: Some(0),
+        };
+
+        assert!(is_held(full, 255));
+        assert!(!is_held(
+            PwmState {
+                raw: 120,
+                enable: Some(0)
+            },
+            120
+        ));
     }
 
     #[test]

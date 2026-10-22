@@ -13,7 +13,7 @@ use std::time::Duration;
 use anyhow::{Context, anyhow, bail};
 
 use crate::binding::BoundOutput;
-use crate::hwmon::{Chip, ManualOverride};
+use crate::hwmon::{Chip, ManualOverride, PwmState, is_held};
 use crate::setup::Setup;
 
 /// Full duty.
@@ -47,8 +47,8 @@ enum Hold {
     Finished,
     /// Ctrl-C or SIGTERM.
     Stopped,
-    /// Something else wrote to the output.
-    Interfered,
+    /// Something else wrote to the output, which now reads like this.
+    Interfered(PwmState),
 }
 
 /// Runs the fan named in `options` at full speed, printing every tachometer
@@ -95,9 +95,10 @@ pub fn run(
     match hold {
         Hold::Finished => writeln!(out, "{}", verdict(&changes, output.pwm()))?,
         Hold::Stopped => bail!("stopped before the time was up"),
-        Hold::Interfered => bail!(
-            "another program wrote to {} during the test, probably CoolerControl. \
-             Stop it with `sudo systemctl stop coolercontrold` and try again.",
+        Hold::Interfered(found) => bail!(
+            "{} changed to {found} during the test, so another program wrote to it, \
+             probably CoolerControl. Stop it with `sudo systemctl stop coolercontrold` \
+             and try again.",
             output.describe()
         ),
     }
@@ -163,10 +164,11 @@ fn wait_one_second(manual: &ManualOverride, stop: &AtomicBool) -> io::Result<Hol
         }
         thread::sleep(TICK);
     }
-    if manual.still_holds(FULL)? {
+    let state = manual.current()?;
+    if is_held(state, FULL) {
         Ok(Hold::Finished)
     } else {
-        Ok(Hold::Interfered)
+        Ok(Hold::Interfered(state))
     }
 }
 
@@ -301,6 +303,18 @@ mod tests {
     }
 
     #[test]
+    fn wait_accepts_the_driver_reporting_full_speed_at_255() {
+        let sysfs = FakeSysfs::new();
+        let (chip, manual) = manual_at_full(&sysfs);
+        chip.write_pwm_enable(1, 0).unwrap(); // what nct6775 reports for manual at 255
+
+        assert_eq!(
+            wait_one_second(&manual, &AtomicBool::new(false)).unwrap(),
+            Hold::Finished
+        );
+    }
+
+    #[test]
     fn wait_notices_another_writer() {
         let sysfs = FakeSysfs::new();
         let (chip, manual) = manual_at_full(&sysfs);
@@ -308,7 +322,10 @@ mod tests {
 
         assert_eq!(
             wait_one_second(&manual, &AtomicBool::new(false)).unwrap(),
-            Hold::Interfered
+            Hold::Interfered(PwmState {
+                raw: 120,
+                enable: Some(1)
+            })
         );
     }
 }
