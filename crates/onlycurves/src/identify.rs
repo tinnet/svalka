@@ -13,7 +13,7 @@ use std::time::Duration;
 use anyhow::{Context, anyhow, bail};
 
 use crate::binding::BoundOutput;
-use crate::hwmon::{Chip, ManualOverride, PwmState, is_held};
+use crate::hwmon::{Chip, HandBack, ManualOverride, PwmState, is_held};
 use crate::setup::Setup;
 
 /// Full duty.
@@ -88,7 +88,7 @@ pub fn run(
     let hold = hold_full_speed(&manual, chip, options.seconds, stop, &mut changes, out)?;
     let saved = manual.saved();
     manual
-        .restore()
+        .hand_back()
         .with_context(|| format!("could not restore {}", output.describe()))?;
     writeln!(out, "\nRestored {} to {saved}.", output.describe())?;
 
@@ -127,7 +127,8 @@ fn take_over(output: &BoundOutput) -> anyhow::Result<ManualOverride> {
             anyhow!(error).context(format!("cannot take over {}", output.describe()))
         }
     };
-    let manual = ManualOverride::take(output.chip(), output.pwm()).map_err(needs_root)?;
+    let manual =
+        ManualOverride::take(output.chip(), output.pwm(), HandBack::Saved).map_err(needs_root)?;
     manual.set(FULL).map_err(needs_root)?;
     Ok(manual)
 }
@@ -286,7 +287,7 @@ mod tests {
         let fake = sysfs.chip("hwmon7", "nct6798", "platform/nct6775.656");
         fake.attr("pwm1", "74").attr("pwm1_enable", "1");
         let chip = Chip::open(fake.dir()).unwrap();
-        let manual = ManualOverride::take(&chip, 1).unwrap();
+        let manual = ManualOverride::take(&chip, 1, HandBack::Saved).unwrap();
         manual.set(FULL).unwrap();
         (chip, manual)
     }

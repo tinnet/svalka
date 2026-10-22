@@ -59,18 +59,29 @@ impl std::fmt::Display for PwmState {
     }
 }
 
+/// How a [`ManualOverride`] hands its output back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandBack {
+    /// Write back the duty and mode the output had before, as `identify` does.
+    Saved,
+    /// Switch to this `pwmN_enable` mode, letting the chip's own curve run the
+    /// fan, as `run` does on exit (5 = SmartFan IV on the nct6775 family).
+    Automatic(u8),
+}
+
 /// Manual control of one PWM output that always hands the output back.
 ///
 /// [`ManualOverride::take`] saves the output's duty and mode and switches it
-/// to manual. [`ManualOverride::restore`] writes the saved values back. If the
-/// override is dropped without `restore` (an early return or a panic), `Drop`
-/// restores it instead, so the fan never stays at whatever we set last.
+/// to manual. [`ManualOverride::hand_back`] returns it as [`HandBack`] says.
+/// If the override is dropped without that (an early return or a panic),
+/// `Drop` hands it back instead, so the fan never stays at whatever we set last.
 #[derive(Debug)]
 pub struct ManualOverride {
     chip: Chip,
     pwm: u32,
     saved: PwmState,
-    restored: bool,
+    hand_back: HandBack,
+    handed_back: bool,
 }
 
 impl ManualOverride {
@@ -80,7 +91,7 @@ impl ManualOverride {
     ///
     /// Fails when the state cannot be read or manual mode cannot be set. On
     /// failure the output is left as it was.
-    pub fn take(chip: &Chip, pwm: u32) -> io::Result<Self> {
+    pub fn take(chip: &Chip, pwm: u32, hand_back: HandBack) -> io::Result<Self> {
         let saved = PwmState {
             raw: chip.read_pwm(pwm)?,
             enable: chip.read_pwm_enable(pwm)?,
@@ -92,7 +103,8 @@ impl ManualOverride {
             chip: chip.clone(),
             pwm,
             saved,
-            restored: false,
+            hand_back,
+            handed_back: false,
         })
     }
 
@@ -111,6 +123,19 @@ impl ManualOverride {
         self.chip.write_pwm(self.pwm, raw)
     }
 
+    /// Switches the output back to manual and sets `raw`, after something else
+    /// (a resume from suspend, another program) took it over.
+    ///
+    /// # Errors
+    ///
+    /// Fails when a write is refused.
+    pub fn reassert(&self, raw: u8) -> io::Result<()> {
+        if self.saved.enable.is_some() {
+            self.chip.write_pwm_enable(self.pwm, MANUAL)?;
+        }
+        self.set(raw)
+    }
+
     /// Reads the output's duty and mode as they are now.
     ///
     /// # Errors
@@ -123,14 +148,21 @@ impl ManualOverride {
         })
     }
 
-    /// Writes the saved duty and mode back.
+    /// Hands the output back as chosen in [`ManualOverride::take`].
     ///
     /// # Errors
     ///
     /// Fails when a write is refused. `Drop` will not try again.
-    pub fn restore(mut self) -> io::Result<()> {
-        self.restored = true;
-        self.write_saved()
+    pub fn hand_back(mut self) -> io::Result<()> {
+        self.handed_back = true;
+        self.write_hand_back()
+    }
+
+    fn write_hand_back(&self) -> io::Result<()> {
+        match self.hand_back {
+            HandBack::Saved => self.write_saved(),
+            HandBack::Automatic(mode) => self.chip.write_pwm_enable(self.pwm, mode),
+        }
     }
 
     /// Duty first, while still in manual mode, then the mode: some drivers
@@ -146,11 +178,11 @@ impl ManualOverride {
 
 impl Drop for ManualOverride {
     fn drop(&mut self) {
-        if !self.restored
-            && let Err(error) = self.write_saved()
+        if !self.handed_back
+            && let Err(error) = self.write_hand_back()
         {
             eprintln!(
-                "onlycurves: could not restore {} pwm{}: {error}",
+                "onlycurves: could not hand back {} pwm{}: {error}",
                 self.chip.name(),
                 self.pwm
             );
@@ -199,11 +231,11 @@ mod tests {
     }
 
     #[test]
-    fn take_switches_to_manual_and_restore_puts_everything_back() {
+    fn take_switches_to_manual_and_hand_back_restores_everything() {
         let sysfs = FakeSysfs::new();
         let chip = nct6798(&sysfs, 5);
 
-        let manual = ManualOverride::take(&chip, 1).unwrap();
+        let manual = ManualOverride::take(&chip, 1, HandBack::Saved).unwrap();
         manual.set(255).unwrap();
         assert_eq!(
             state(&chip),
@@ -214,7 +246,7 @@ mod tests {
         );
         assert!(is_held(manual.current().unwrap(), 255));
 
-        manual.restore().unwrap();
+        manual.hand_back().unwrap();
         assert_eq!(
             state(&chip),
             PwmState {
@@ -225,12 +257,12 @@ mod tests {
     }
 
     #[test]
-    fn dropping_without_restore_still_restores() {
+    fn dropping_without_hand_back_still_hands_back() {
         let sysfs = FakeSysfs::new();
         let chip = nct6798(&sysfs, 1);
 
         {
-            let manual = ManualOverride::take(&chip, 1).unwrap();
+            let manual = ManualOverride::take(&chip, 1, HandBack::Saved).unwrap();
             manual.set(255).unwrap();
         }
 
@@ -280,15 +312,51 @@ mod tests {
         fake.attr("pwm1", "0");
         let chip = Chip::open(fake.dir()).unwrap();
 
-        let manual = ManualOverride::take(&chip, 1).unwrap();
+        let manual = ManualOverride::take(&chip, 1, HandBack::Saved).unwrap();
         manual.set(255).unwrap();
-        manual.restore().unwrap();
+        manual.hand_back().unwrap();
 
         assert_eq!(
             state(&chip),
             PwmState {
                 raw: 0,
                 enable: None
+            }
+        );
+    }
+
+    #[test]
+    fn automatic_hand_back_switches_to_the_chips_own_mode() {
+        let sysfs = FakeSysfs::new();
+        let chip = nct6798(&sysfs, 1);
+
+        let manual = ManualOverride::take(&chip, 1, HandBack::Automatic(5)).unwrap();
+        manual.set(200).unwrap();
+        manual.hand_back().unwrap();
+
+        assert_eq!(
+            state(&chip),
+            PwmState {
+                raw: 200,
+                enable: Some(5)
+            }
+        );
+    }
+
+    #[test]
+    fn reassert_takes_the_output_back() {
+        let sysfs = FakeSysfs::new();
+        let chip = nct6798(&sysfs, 5);
+        let manual = ManualOverride::take(&chip, 1, HandBack::Saved).unwrap();
+        chip.write_pwm_enable(1, 5).unwrap(); // e.g. the BIOS after resume
+
+        manual.reassert(150).unwrap();
+
+        assert_eq!(
+            state(&chip),
+            PwmState {
+                raw: 150,
+                enable: Some(1)
             }
         );
     }
