@@ -90,6 +90,7 @@ pub struct ChipSnapshot {
 
 impl ChipSnapshot {
     /// Whether the chip has no temperatures, fans or PWM outputs at all.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.temps.is_empty() && self.fans.is_empty() && self.pwms.is_empty()
     }
@@ -99,6 +100,10 @@ impl Chip {
     /// Reads every temperature, fan and PWM output of the chip.
     ///
     /// A single unreadable value does not fail the snapshot; it shows up as `None`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the chip's directory cannot be listed.
     pub fn snapshot(&self) -> io::Result<ChipSnapshot> {
         Ok(ChipSnapshot {
             name: self.name().to_owned(),
@@ -110,6 +115,11 @@ impl Chip {
         })
     }
 
+    /// Reads every `tempN_input`, sorted by N.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the chip's directory cannot be listed.
     pub fn read_temps(&self) -> io::Result<Vec<Temp>> {
         let temps = self
             .attribute_indices("temp", "_input")?
@@ -124,6 +134,11 @@ impl Chip {
         Ok(temps)
     }
 
+    /// Reads every `fanN_input`, sorted by N.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the chip's directory cannot be listed.
     pub fn read_fans(&self) -> io::Result<Vec<Fan>> {
         let fans = self
             .attribute_indices("fan", "_input")?
@@ -136,6 +151,11 @@ impl Chip {
         Ok(fans)
     }
 
+    /// Reads every `pwmN` with its `pwmN_enable`, sorted by N.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the chip's directory cannot be listed.
     pub fn read_pwms(&self) -> io::Result<Vec<Pwm>> {
         let pwms = self
             .attribute_indices("pwm", "")?

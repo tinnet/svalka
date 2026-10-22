@@ -28,7 +28,11 @@ pub struct Chip {
 }
 
 impl Chip {
-    /// Opens the chip in `dir`. Fails when the chip has no readable `name`.
+    /// Opens the chip in `dir`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the chip has no readable `name` attribute.
     pub fn open(dir: &Path) -> io::Result<Self> {
         Ok(Self {
             dir: dir.to_path_buf(),
@@ -37,15 +41,18 @@ impl Chip {
         })
     }
 
+    #[must_use]
     pub fn name(&self) -> &str {
         &self.name
     }
 
+    #[must_use]
     pub fn dir(&self) -> &Path {
         &self.dir
     }
 
     /// The chip's current `hwmonN` number. Only useful for display: it changes between boots.
+    #[must_use]
     pub fn hwmon_number(&self) -> String {
         file_name_of(&self.dir)
     }
@@ -59,6 +66,7 @@ impl Chip {
     ///
     /// So `nct6775.656`, `platform/nct6775.656` and the full path all match the
     /// device `/sys/devices/platform/nct6775.656`, but `6775.656` does not.
+    #[must_use]
     pub fn device_matches(&self, path: &Path) -> bool {
         self.device
             .as_deref()
@@ -70,6 +78,10 @@ impl Chip {
 ///
 /// Chips come back sorted by name and device, so the order is the same on every
 /// boot. Directories that are not a readable chip are skipped.
+///
+/// # Errors
+///
+/// Fails when `hwmon_root` cannot be listed.
 pub fn discover(hwmon_root: &Path) -> io::Result<Vec<Chip>> {
     let mut chips = Vec::new();
     for entry in fs::read_dir(hwmon_root)? {

@@ -39,6 +39,11 @@ impl std::error::Error for ResolveError {}
 /// Picks the one chip called `name` whose device path ends with `path`.
 ///
 /// Without a `path`, the name alone must be unique.
+///
+/// # Errors
+///
+/// [`ResolveError::NotFound`] when nothing matches, [`ResolveError::Ambiguous`]
+/// when more than one chip does.
 pub fn resolve<'a>(
     chips: &'a [Chip],
     name: &str,

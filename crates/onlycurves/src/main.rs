@@ -1,9 +1,7 @@
-mod hwmon;
-mod sysfs;
-
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
+use onlycurves::status;
 use shadow_rs::shadow;
 
 shadow!(build);
@@ -24,13 +22,30 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Print every temperature, fan speed and PWM duty (read-only)
-    Status,
+    Status(StatusArgs),
+}
+
+#[derive(Args)]
+struct StatusArgs {
+    /// Only show the chip with this driver name, e.g. nct6798
+    #[arg(long)]
+    chip: Option<String>,
+
+    /// Device path that tells chips with the same name apart, e.g. nct6775.656
+    #[arg(long, requires = "chip")]
+    path: Option<String>,
 }
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    match cli.command {
-        Command::Status => println!("status: not implemented yet"),
+    match &cli.command {
+        Command::Status(args) => {
+            let filter = status::ChipFilter {
+                name: args.chip.as_deref(),
+                path: args.path.as_deref(),
+            };
+            print!("{}", status::run(&cli.hwmon_root, &filter)?);
+        }
     }
     Ok(())
 }
