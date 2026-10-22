@@ -2,6 +2,7 @@
 //! scale. Shared by the daemon and, later, the TUI.
 
 pub mod config;
+pub mod controller;
 pub mod curve;
 pub mod duration;
 pub mod pwm;
