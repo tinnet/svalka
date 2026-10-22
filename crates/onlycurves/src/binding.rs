@@ -61,7 +61,7 @@ impl BoundOutput {
     /// E.g. `nct6798 pwm2`.
     #[must_use]
     pub fn describe(&self) -> String {
-        format!("{} pwm{}", self.chip.name(), self.pwm)
+        self.chip.describe_pwm(self.pwm)
     }
 
     /// The fan's speed from the tachometer with the same number (`fanN` for
@@ -213,16 +213,21 @@ fn bind_sensor(sensor: &SensorRef, chips: &[Chip]) -> Result<BoundSensor, String
 
 /// N of the input labelled `label`, or a message listing the labels there are.
 fn find_labelled_temp(chip: &Chip, label: &str) -> Result<u32, String> {
-    let unreadable = |error: io::Error| format!("cannot read {}: {error}", chip.dir().display());
-    if let Some(index) = chip.find_temp(label).map_err(unreadable)? {
-        return Ok(index);
+    let inputs = chip.temp_inputs().map_err(unreadable(chip))?;
+    if let Some(&(n, _)) = inputs.iter().find(|(_, input)| input == label) {
+        return Ok(n);
     }
-    let labels = chip.temp_labels().map_err(unreadable)?;
+    let labels: Vec<&str> = inputs.iter().map(|(_, input)| input.as_str()).collect();
     Err(format!(
         "{} has no temperature labelled {label:?}; it has: {}",
         chip.name(),
         labels.join(", ")
     ))
+}
+
+/// Turns an I/O error on `chip` into a problem message.
+fn unreadable(chip: &Chip) -> impl Fn(io::Error) -> String + '_ {
+    move |error| format!("cannot read {}: {error}", chip.dir().display())
 }
 
 fn check_plausible(sensor: &BoundSensor) -> Result<(), String> {
@@ -248,9 +253,7 @@ fn is_plausible(celsius: f64) -> bool {
 fn bind_output(output: &OutputRef, chips: &[Chip]) -> Result<BoundOutput, String> {
     let chip = hwmon::resolve(chips, &output.chip, output.path.as_deref())
         .map_err(|error| error.to_string())?;
-    let numbers = chip
-        .pwm_numbers()
-        .map_err(|error| format!("cannot read {}: {error}", chip.dir().display()))?;
+    let numbers = chip.pwm_numbers().map_err(unreadable(chip))?;
     if !numbers.contains(&output.pwm) {
         let names: Vec<String> = numbers.iter().map(|n| format!("pwm{n}")).collect();
         return Err(format!(

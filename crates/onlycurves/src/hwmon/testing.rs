@@ -34,7 +34,11 @@ impl FakeSysfs {
         fs::create_dir_all(&chip_dir).unwrap();
         symlink(&device_dir, chip_dir.join("device")).unwrap();
 
-        let chip = FakeChip { dir: chip_dir };
+        let chip = FakeChip {
+            dir: chip_dir,
+            device_dir,
+            drivers_dir: self.root.path().join("bus/drivers"),
+        };
         chip.attr("name", name);
         chip
     }
@@ -42,12 +46,22 @@ impl FakeSysfs {
 
 pub struct FakeChip {
     dir: PathBuf,
+    device_dir: PathBuf,
+    drivers_dir: PathBuf,
 }
 
 impl FakeChip {
     /// Writes one attribute file, with the trailing newline the kernel adds.
     pub fn attr(&self, file: &str, value: &str) -> &Self {
         fs::write(self.dir.join(file), format!("{value}\n")).unwrap();
+        self
+    }
+
+    /// Binds the chip's device to kernel driver `driver`, e.g. `nct6775`.
+    pub fn driver(&self, driver: &str) -> &Self {
+        let driver_dir = self.drivers_dir.join(driver);
+        fs::create_dir_all(&driver_dir).unwrap();
+        symlink(&driver_dir, self.device_dir.join("driver")).unwrap();
         self
     }
 

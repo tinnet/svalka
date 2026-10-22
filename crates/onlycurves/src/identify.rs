@@ -13,7 +13,7 @@ use std::time::Duration;
 use anyhow::{Context, anyhow, bail};
 
 use crate::binding::BoundOutput;
-use crate::hwmon::{Chip, HandBack, ManualOverride, PwmState, is_held};
+use crate::hwmon::{Chip, HandBack, ManualOverride, PwmState};
 use crate::setup::Setup;
 
 /// Full duty.
@@ -155,7 +155,7 @@ fn wait_one_second(manual: &ManualOverride, stop: &AtomicBool) -> io::Result<Hol
         thread::sleep(TICK);
     }
     let state = manual.current()?;
-    if is_held(state, FULL) {
+    if state.is_held_at(FULL) {
         Ok(Hold::Finished)
     } else {
         Ok(Hold::Interfered(state))
@@ -231,6 +231,7 @@ pub fn verdict(changes: &[RpmChange], pwm: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hwmon::PwmEnable;
     use crate::hwmon::testing::FakeSysfs;
 
     fn change(label: &str, before: u32, peak: u32) -> RpmChange {
@@ -296,7 +297,7 @@ mod tests {
     fn wait_accepts_the_driver_reporting_full_speed_at_255() {
         let sysfs = FakeSysfs::new();
         let (chip, manual) = manual_at_full(&sysfs);
-        chip.write_pwm_enable(1, 0).unwrap(); // what nct6775 reports for manual at 255
+        chip.write_pwm_enable(1, PwmEnable::FullSpeed).unwrap(); // what nct6775 reports for manual at 255
 
         assert_eq!(
             wait_one_second(&manual, &AtomicBool::new(false)).unwrap(),
@@ -314,7 +315,7 @@ mod tests {
             wait_one_second(&manual, &AtomicBool::new(false)).unwrap(),
             Hold::Interfered(PwmState {
                 raw: 120,
-                enable: Some(1)
+                enable: Some(PwmEnable::Manual)
             })
         );
     }

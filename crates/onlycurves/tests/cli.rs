@@ -35,6 +35,7 @@ impl FakeSysfs {
                 ("pwm2_enable", "1"),
             ],
         );
+        sysfs.bind_driver("platform/nct6775.656", "nct6775");
         sysfs.chip(
             "hwmon1",
             "amdgpu",
@@ -80,6 +81,17 @@ impl FakeSysfs {
         let path = self.root.path().join("onlycurves.toml");
         fs::write(&path, text).unwrap();
         path
+    }
+
+    /// Binds `device` (a path below `devices/`) to kernel driver `driver`.
+    fn bind_driver(&self, device: &str, driver: &str) {
+        let driver_dir = self.root.path().join("bus/drivers").join(driver);
+        fs::create_dir_all(&driver_dir).unwrap();
+        symlink(
+            &driver_dir,
+            self.root.path().join("devices").join(device).join("driver"),
+        )
+        .unwrap();
     }
 
     fn hwmon_root(&self) -> PathBuf {
@@ -451,10 +463,10 @@ fn restore_hands_every_configured_fan_back_to_the_chip() {
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "nct6798 pwm2 handed back to the chip (mode 5)",
+            "nct6798 pwm2 handed back to the chip, automatic (5)",
         ))
         .stdout(predicate::str::contains(
-            "nct6798 pwm1 handed back to the chip (mode 5)",
+            "nct6798 pwm1 handed back to the chip, automatic (5)",
         ));
     assert_eq!(nct6798_attribute(&sysfs, "pwm1_enable"), "5");
     assert_eq!(nct6798_attribute(&sysfs, "pwm2_enable"), "5");
@@ -506,7 +518,7 @@ fn restore_uses_the_record_when_the_config_is_broken() {
             "using only the record; the config does not load",
         ))
         .stdout(predicate::str::contains(
-            "nct6798 pwm2 handed back to the chip (mode 5)",
+            "nct6798 pwm2 handed back to the chip, automatic (5)",
         ));
     assert_eq!(nct6798_attribute(&sysfs, "pwm2_enable"), "5");
     assert_eq!(

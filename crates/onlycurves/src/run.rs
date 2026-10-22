@@ -21,7 +21,7 @@ use onlycurves_core::pwm;
 use onlycurves_core::state::{FanMode, FanSnapshot, Snapshot, VERSION};
 
 use crate::binding::{Bindings, BoundOutput};
-use crate::hwmon::{HandBack, ManualOverride, automatic_mode, is_held};
+use crate::hwmon::{HandBack, ManualOverride, PwmEnable};
 use crate::log;
 use crate::notify::Notifier;
 use crate::record::{HeldOutput, OutputRecord};
@@ -308,8 +308,8 @@ fn take_over(output: &BoundOutput) -> anyhow::Result<ManualOverride> {
 }
 
 /// The chip's automatic mode for `output`, which it is handed back to.
-fn firmware_mode(output: &BoundOutput) -> anyhow::Result<u8> {
-    automatic_mode(output.chip()).ok_or_else(|| {
+fn firmware_mode(output: &BoundOutput) -> anyhow::Result<PwmEnable> {
+    output.chip().automatic_mode().ok_or_else(|| {
         anyhow!(
             "{}: onlycurves does not know this chip's automatic mode, so it could not \
              hand the fan back on exit; only nct6775-family chips are supported",
@@ -436,7 +436,7 @@ impl FanLoop {
 
     /// Writes `raw` if it differs from what we wrote last, first taking the
     /// output back if something else changed it. Returns `pwmN_enable` as read.
-    fn write_duty(&mut self, raw: u8) -> anyhow::Result<Option<u8>> {
+    fn write_duty(&mut self, raw: u8) -> anyhow::Result<Option<PwmEnable>> {
         let current = self
             .manual
             .current()
@@ -451,7 +451,7 @@ impl FanLoop {
             return Ok(current.enable);
         }
         if let Some(written) = self.written
-            && !is_held(current, written)
+            && !current.is_held_at(written)
         {
             self.report_interference(&format!("{current}"));
             self.manual
@@ -575,7 +575,7 @@ impl FanLoop {
         &self,
         tick: &Tick,
         raw: u8,
-        pwm_enable: Option<u8>,
+        pwm_enable: Option<PwmEnable>,
         rpm: Option<u32>,
     ) -> FanSnapshot {
         FanSnapshot {
@@ -591,7 +591,7 @@ impl FanLoop {
             effective_celsius: tick.effective,
             duty: tick.duty,
             pwm_raw: raw,
-            pwm_enable,
+            pwm_enable: pwm_enable.map(u8::from),
             rpm,
         }
     }
@@ -687,6 +687,7 @@ curve   = [[40, 40], [60, 60]]
             .attr("temp1_label", "Tctl");
         sysfs
             .chip("hwmon7", "nct6798", "platform/nct6775.656")
+            .driver("nct6775")
             .attr("pwm1", "74")
             .attr("pwm1_enable", "5")
             .attr("pwm2", "98")
@@ -730,7 +731,11 @@ curve   = [[40, 40], [60, 60]]
         tick(&setup.bindings, &mut fans).unwrap();
 
         // What a resume from suspend can do: the BIOS takes the output back.
-        fans[0].output.chip().write_pwm_enable(2, 5).unwrap();
+        fans[0]
+            .output
+            .chip()
+            .write_pwm_enable(2, PwmEnable::Automatic(5))
+            .unwrap();
         tick(&setup.bindings, &mut fans).unwrap();
 
         assert_eq!(pwm2(&sysfs), ("128".into(), "1".into()));

@@ -33,6 +33,19 @@ pub fn read_value<T: FromStr>(path: &Path) -> io::Result<T> {
     })
 }
 
+/// Like [`read_value`], but a missing file is `None`: for attributes only some
+/// chips have, such as `pwmN_enable` or `fanN_input`.
+///
+/// # Errors
+///
+/// Fails when the file exists but cannot be read or parsed.
+pub fn read_optional<T: FromStr>(path: &Path) -> io::Result<Option<T>> {
+    match read_value(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        result => result.map(Some),
+    }
+}
+
 /// Writes one value to an attribute file.
 ///
 /// # Errors

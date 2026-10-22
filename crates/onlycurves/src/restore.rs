@@ -16,7 +16,7 @@ use anyhow::{Context, anyhow, bail};
 use onlycurves_core::config::ConfigError;
 
 use crate::binding;
-use crate::hwmon::{self, Chip, automatic_mode};
+use crate::hwmon::{self, Chip};
 use crate::record::{HeldOutput, OutputRecord};
 use crate::setup;
 
@@ -55,11 +55,7 @@ pub fn run(
     let mut failures = Vec::new();
     for output in union(recorded.unwrap_or_default(), configured) {
         match hand_back(&output) {
-            Ok(describe) => writeln!(
-                out,
-                "{describe} handed back to the chip (mode {})",
-                output.mode
-            )?,
+            Ok(describe) => writeln!(out, "{describe} handed back to the chip, {}", output.mode)?,
             Err(error) => failures.push(format!("{error:#}")),
         }
     }
@@ -89,7 +85,7 @@ fn configured_outputs(config_path: &Path, hwmon_root: &Path) -> anyhow::Result<V
     outputs
         .values()
         .map(|output| {
-            let mode = automatic_mode(output.chip()).ok_or_else(|| {
+            let mode = output.chip().automatic_mode().ok_or_else(|| {
                 anyhow!(
                     "{}: this chip's automatic mode is unknown",
                     output.describe()
@@ -115,7 +111,7 @@ fn union(recorded: Vec<HeldOutput>, configured: Vec<HeldOutput>) -> Vec<HeldOutp
 fn hand_back(output: &HeldOutput) -> anyhow::Result<String> {
     let chip = Chip::open(&output.chip_dir)
         .with_context(|| format!("cannot open {}", output.chip_dir.display()))?;
-    let describe = format!("{} pwm{}", chip.name(), output.pwm);
+    let describe = chip.describe_pwm(output.pwm);
     chip.write_pwm_enable(output.pwm, output.mode)
         .with_context(|| format!("cannot write {describe}"))?;
     Ok(describe)
@@ -126,13 +122,14 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+    use crate::hwmon::PwmEnable;
 
     #[test]
     fn union_keeps_each_output_once_preferring_the_record() {
         let held = |dir: &str, pwm, mode| HeldOutput {
             chip_dir: PathBuf::from(dir),
             pwm,
-            mode,
+            mode: PwmEnable::Automatic(mode),
         };
 
         let all = union(

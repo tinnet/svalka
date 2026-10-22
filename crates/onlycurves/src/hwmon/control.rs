@@ -14,12 +14,21 @@ impl Chip {
     /// # Errors
     ///
     /// Fails when the attribute exists but cannot be read.
-    pub fn read_pwm_enable(&self, n: u32) -> io::Result<Option<u8>> {
-        let path = self.dir().join(format!("pwm{n}_enable"));
-        if !path.exists() {
-            return Ok(None);
-        }
-        sysfs::read_value(&path).map(Some)
+    pub fn read_pwm_enable(&self, n: u32) -> io::Result<Option<PwmEnable>> {
+        let mode: Option<u8> = sysfs::read_optional(&self.dir().join(format!("pwm{n}_enable")))?;
+        Ok(mode.map(PwmEnable::from))
+    }
+
+    /// Reads `pwmN` and `pwmN_enable` together.
+    ///
+    /// # Errors
+    ///
+    /// Fails when either cannot be read.
+    pub fn read_pwm_state(&self, n: u32) -> io::Result<PwmState> {
+        Ok(PwmState {
+            raw: self.read_pwm(n)?,
+            enable: self.read_pwm_enable(n)?,
+        })
     }
 
     /// Writes `pwmN_enable`.
@@ -27,8 +36,8 @@ impl Chip {
     /// # Errors
     ///
     /// Fails when the write is refused, e.g. without root.
-    pub fn write_pwm_enable(&self, n: u32, mode: u8) -> io::Result<()> {
-        sysfs::write_value(&self.dir().join(format!("pwm{n}_enable")), mode)
+    pub fn write_pwm_enable(&self, n: u32, mode: PwmEnable) -> io::Result<()> {
+        sysfs::write_value(&self.dir().join(format!("pwm{n}_enable")), u8::from(mode))
     }
 
     /// Writes the raw duty (0–255) of `pwmN`.
@@ -39,21 +48,53 @@ impl Chip {
     pub fn write_pwm(&self, n: u32, raw: u8) -> io::Result<()> {
         sysfs::write_value(&self.dir().join(format!("pwm{n}")), raw)
     }
+
+    /// The `pwmN_enable` mode in which the chip runs its own fan curve, for
+    /// the kernel drivers where it is known: SmartFan IV (5) under nct6775,
+    /// which serves nct6106 … nct6799. Keyed on the driver, not the chip name:
+    /// what the modes mean is up to the driver, and nct6683-family chips share
+    /// the name prefix but not the driver.
+    #[must_use]
+    pub fn automatic_mode(&self) -> Option<PwmEnable> {
+        match self.driver()? {
+            "nct6775" => Some(PwmEnable::Automatic(5)),
+            _ => None,
+        }
+    }
 }
 
-/// What an output was set to before we took it over.
+/// An output's duty and mode at one moment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PwmState {
     pub raw: u8,
     /// `None` when the chip has no `pwmN_enable`.
-    pub enable: Option<u8>,
+    pub enable: Option<PwmEnable>,
+}
+
+impl PwmState {
+    /// Whether this is still what we set: duty `raw` in manual mode, i.e.
+    /// nothing else has written to the output since we did.
+    ///
+    /// The nct6775 driver reports a manual output at exactly 255 as
+    /// `pwmN_enable = 0` (full speed). It recomputes that on its next register
+    /// refresh, not at our write, so reading back right after writing cannot
+    /// tell us what to expect: at 255 both values mean manual.
+    #[must_use]
+    pub fn is_held_at(&self, raw: u8) -> bool {
+        let manual = match self.enable {
+            None | Some(PwmEnable::Manual) => true,
+            Some(PwmEnable::FullSpeed) => raw == u8::MAX,
+            Some(PwmEnable::Automatic(_)) => false,
+        };
+        self.raw == raw && manual
+    }
 }
 
 impl std::fmt::Display for PwmState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}/255", self.raw)?;
         if let Some(enable) = self.enable {
-            write!(f, ", {}", PwmEnable::from(enable))?;
+            write!(f, ", {enable}")?;
         }
         Ok(())
     }
@@ -64,9 +105,9 @@ impl std::fmt::Display for PwmState {
 pub enum HandBack {
     /// Write back the duty and mode the output had before, as `identify` does.
     Saved,
-    /// Switch to this `pwmN_enable` mode, letting the chip's own curve run the
-    /// fan, as `run` does on exit (5 = SmartFan IV on the nct6775 family).
-    Automatic(u8),
+    /// Switch to this mode, letting the chip's own curve run the fan, as `run`
+    /// does on exit (see [`Chip::automatic_mode`]).
+    Automatic(PwmEnable),
 }
 
 /// Manual control of one PWM output that always hands the output back.
@@ -92,13 +133,8 @@ impl ManualOverride {
     /// Fails when the state cannot be read or manual mode cannot be set. On
     /// failure the output is left as it was.
     pub fn take(chip: &Chip, pwm: u32, hand_back: HandBack) -> io::Result<Self> {
-        let saved = PwmState {
-            raw: chip.read_pwm(pwm)?,
-            enable: chip.read_pwm_enable(pwm)?,
-        };
-        if saved.enable.is_some() {
-            chip.write_pwm_enable(pwm, MANUAL)?;
-        }
+        let saved = chip.read_pwm_state(pwm)?;
+        switch_to_manual(chip, pwm, saved)?;
         Ok(Self {
             chip: chip.clone(),
             pwm,
@@ -130,9 +166,7 @@ impl ManualOverride {
     ///
     /// Fails when a write is refused.
     pub fn reassert(&self, raw: u8) -> io::Result<()> {
-        if self.saved.enable.is_some() {
-            self.chip.write_pwm_enable(self.pwm, MANUAL)?;
-        }
+        switch_to_manual(&self.chip, self.pwm, self.saved)?;
         self.set(raw)
     }
 
@@ -142,10 +176,7 @@ impl ManualOverride {
     ///
     /// Fails when the output cannot be read.
     pub fn current(&self) -> io::Result<PwmState> {
-        Ok(PwmState {
-            raw: self.chip.read_pwm(self.pwm)?,
-            enable: self.chip.read_pwm_enable(self.pwm)?,
-        })
+        self.chip.read_pwm_state(self.pwm)
     }
 
     /// Hands the output back as chosen in [`ManualOverride::take`].
@@ -182,42 +213,21 @@ impl Drop for ManualOverride {
             && let Err(error) = self.write_hand_back()
         {
             eprintln!(
-                "onlycurves: could not hand back {} pwm{}: {error}",
-                self.chip.name(),
-                self.pwm
+                "onlycurves: could not hand back {}: {error}",
+                self.chip.describe_pwm(self.pwm)
             );
         }
     }
 }
 
-/// The `pwmN_enable` mode in which `chip` runs its own fan curve, for the
-/// drivers where it is known: 5 (SmartFan IV) on the nct6775 family
-/// (nct6106 … nct6799).
-#[must_use]
-pub fn automatic_mode(chip: &Chip) -> Option<u8> {
-    chip.name().starts_with("nct6").then_some(5)
+/// Puts `pwmN` in manual mode. Outputs without `pwmN_enable` (as `saved`
+/// shows) take duty writes without a mode switch.
+fn switch_to_manual(chip: &Chip, pwm: u32, saved: PwmState) -> io::Result<()> {
+    if saved.enable.is_some() {
+        chip.write_pwm_enable(pwm, PwmEnable::Manual)?;
+    }
+    Ok(())
 }
-
-/// Whether `state` is still what we set: duty `raw` in manual mode, i.e.
-/// nothing else has written to the output since we did.
-///
-/// The nct6775 driver family reports a manual output at exactly 255 as
-/// `pwmN_enable = 0` (full speed), so at 255 both 0 and 1 mean manual.
-#[must_use]
-pub fn is_held(state: PwmState, raw: u8) -> bool {
-    let manual = match state.enable {
-        None | Some(MANUAL) => true,
-        Some(FULL_SPEED) => raw == u8::MAX,
-        Some(_) => false,
-    };
-    state.raw == raw && manual
-}
-
-/// `pwmN_enable` value for "no control, full speed".
-const FULL_SPEED: u8 = 0;
-
-/// `pwmN_enable` value for manual control.
-const MANUAL: u8 = 1;
 
 #[cfg(test)]
 mod tests {
@@ -226,15 +236,16 @@ mod tests {
 
     fn nct6798(sysfs: &FakeSysfs, enable: u8) -> Chip {
         let fake = sysfs.chip("hwmon7", "nct6798", "platform/nct6775.656");
-        fake.attr("pwm1", "74")
+        fake.driver("nct6775")
+            .attr("pwm1", "74")
             .attr("pwm1_enable", &enable.to_string());
         Chip::open(fake.dir()).unwrap()
     }
 
-    fn state(chip: &Chip) -> PwmState {
+    fn state(raw: u8, enable: u8) -> PwmState {
         PwmState {
-            raw: chip.read_pwm(1).unwrap(),
-            enable: chip.read_pwm_enable(1).unwrap(),
+            raw,
+            enable: Some(PwmEnable::from(enable)),
         }
     }
 
@@ -245,23 +256,11 @@ mod tests {
 
         let manual = ManualOverride::take(&chip, 1, HandBack::Saved).unwrap();
         manual.set(255).unwrap();
-        assert_eq!(
-            state(&chip),
-            PwmState {
-                raw: 255,
-                enable: Some(1)
-            }
-        );
-        assert!(is_held(manual.current().unwrap(), 255));
+        assert_eq!(chip.read_pwm_state(1).unwrap(), state(255, 1));
+        assert!(manual.current().unwrap().is_held_at(255));
 
         manual.hand_back().unwrap();
-        assert_eq!(
-            state(&chip),
-            PwmState {
-                raw: 74,
-                enable: Some(5)
-            }
-        );
+        assert_eq!(chip.read_pwm_state(1).unwrap(), state(74, 5));
     }
 
     #[test]
@@ -274,43 +273,21 @@ mod tests {
             manual.set(255).unwrap();
         }
 
-        assert_eq!(
-            state(&chip),
-            PwmState {
-                raw: 74,
-                enable: Some(1)
-            }
-        );
+        assert_eq!(chip.read_pwm_state(1).unwrap(), state(74, 1));
     }
 
     #[test]
-    fn is_held_notices_other_writers() {
-        let state = |raw, enable| PwmState {
-            raw,
-            enable: Some(enable),
-        };
-
-        assert!(is_held(state(120, 1), 120));
-        assert!(!is_held(state(98, 1), 120)); // duty changed
-        assert!(!is_held(state(120, 5), 120)); // chip took control back
+    fn is_held_at_notices_other_writers() {
+        assert!(state(120, 1).is_held_at(120));
+        assert!(!state(98, 1).is_held_at(120)); // duty changed
+        assert!(!state(120, 5).is_held_at(120)); // chip took control back
     }
 
     #[test]
-    fn is_held_accepts_full_speed_at_255() {
+    fn is_held_at_accepts_full_speed_at_255() {
         // nct6775 reports manual mode at 255 as pwmN_enable = 0.
-        let full = PwmState {
-            raw: 255,
-            enable: Some(0),
-        };
-
-        assert!(is_held(full, 255));
-        assert!(!is_held(
-            PwmState {
-                raw: 120,
-                enable: Some(0)
-            },
-            120
-        ));
+        assert!(state(255, 0).is_held_at(255));
+        assert!(!state(120, 0).is_held_at(120));
     }
 
     #[test]
@@ -324,31 +301,37 @@ mod tests {
         manual.set(255).unwrap();
         manual.hand_back().unwrap();
 
-        assert_eq!(
-            state(&chip),
-            PwmState {
-                raw: 0,
-                enable: None
-            }
-        );
+        let untouched = PwmState {
+            raw: 0,
+            enable: None,
+        };
+        assert_eq!(chip.read_pwm_state(1).unwrap(), untouched);
     }
 
     #[test]
     fn automatic_hand_back_switches_to_the_chips_own_mode() {
         let sysfs = FakeSysfs::new();
         let chip = nct6798(&sysfs, 1);
+        let mode = chip.automatic_mode().unwrap();
 
-        let manual = ManualOverride::take(&chip, 1, HandBack::Automatic(5)).unwrap();
+        let manual = ManualOverride::take(&chip, 1, HandBack::Automatic(mode)).unwrap();
         manual.set(200).unwrap();
         manual.hand_back().unwrap();
 
+        assert_eq!(chip.read_pwm_state(1).unwrap(), state(200, 5));
+    }
+
+    #[test]
+    fn automatic_mode_is_known_only_for_the_nct6775_driver() {
+        let sysfs = FakeSysfs::new();
+        let other = sysfs.chip("hwmon2", "nct6687", "platform/nct6683.2592");
+        other.driver("nct6683");
+
         assert_eq!(
-            state(&chip),
-            PwmState {
-                raw: 200,
-                enable: Some(5)
-            }
+            nct6798(&sysfs, 5).automatic_mode(),
+            Some(PwmEnable::Automatic(5))
         );
+        assert_eq!(Chip::open(other.dir()).unwrap().automatic_mode(), None);
     }
 
     #[test]
@@ -356,26 +339,15 @@ mod tests {
         let sysfs = FakeSysfs::new();
         let chip = nct6798(&sysfs, 5);
         let manual = ManualOverride::take(&chip, 1, HandBack::Saved).unwrap();
-        chip.write_pwm_enable(1, 5).unwrap(); // e.g. the BIOS after resume
+        chip.write_pwm_enable(1, PwmEnable::Automatic(5)).unwrap(); // e.g. the BIOS after resume
 
         manual.reassert(150).unwrap();
 
-        assert_eq!(
-            state(&chip),
-            PwmState {
-                raw: 150,
-                enable: Some(1)
-            }
-        );
+        assert_eq!(chip.read_pwm_state(1).unwrap(), state(150, 1));
     }
 
     #[test]
     fn state_displays_duty_and_mode() {
-        let state = PwmState {
-            raw: 74,
-            enable: Some(5),
-        };
-
-        assert_eq!(state.to_string(), "74/255, automatic (5)");
+        assert_eq!(state(74, 5).to_string(), "74/255, automatic (5)");
     }
 }

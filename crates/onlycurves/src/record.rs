@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 use crate::binding::BoundOutput;
 use crate::files;
+use crate::hwmon::PwmEnable;
 
 const FILE_NAME: &str = "outputs";
 
@@ -21,12 +22,12 @@ const FILE_NAME: &str = "outputs";
 pub struct HeldOutput {
     pub chip_dir: PathBuf,
     pub pwm: u32,
-    pub mode: u8,
+    pub mode: PwmEnable,
 }
 
 impl HeldOutput {
     #[must_use]
-    pub fn of(output: &BoundOutput, mode: u8) -> Self {
+    pub fn of(output: &BoundOutput, mode: PwmEnable) -> Self {
         Self {
             chip_dir: output.chip().dir().to_path_buf(),
             pwm: output.pwm(),
@@ -108,7 +109,7 @@ impl OutputRecord {
 fn format_line(output: &HeldOutput) -> String {
     format!(
         "{} {} {}\n",
-        output.mode,
+        u8::from(output.mode),
         output.pwm,
         output.chip_dir.display()
     )
@@ -117,7 +118,7 @@ fn format_line(output: &HeldOutput) -> String {
 /// The inverse of [`format_line`]. The directory comes last, so it may hold spaces.
 fn parse_line(line: &str) -> Option<HeldOutput> {
     let mut fields = line.splitn(3, ' ');
-    let mode = fields.next()?.parse().ok()?;
+    let mode = PwmEnable::from(fields.next()?.parse::<u8>().ok()?);
     let pwm = fields.next()?.parse().ok()?;
     let chip_dir = PathBuf::from(fields.next()?);
     Some(HeldOutput {
@@ -135,7 +136,7 @@ mod tests {
         HeldOutput {
             chip_dir: PathBuf::from(dir),
             pwm,
-            mode: 5,
+            mode: PwmEnable::Automatic(5),
         }
     }
 

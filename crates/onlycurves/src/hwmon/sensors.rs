@@ -69,6 +69,16 @@ impl From<u8> for PwmEnable {
     }
 }
 
+impl From<PwmEnable> for u8 {
+    fn from(mode: PwmEnable) -> Self {
+        match mode {
+            PwmEnable::FullSpeed => 0,
+            PwmEnable::Manual => 1,
+            PwmEnable::Automatic(mode) => mode,
+        }
+    }
+}
+
 impl fmt::Display for PwmEnable {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -124,10 +134,10 @@ impl Chip {
     /// Fails when the chip's directory cannot be listed.
     pub fn read_temps(&self) -> io::Result<Vec<Temp>> {
         let temps = self
-            .attribute_indices("temp", "_input")?
+            .temp_inputs()?
             .into_iter()
-            .map(|n| Temp {
-                label: self.temp_label(n),
+            .map(|(n, label)| Temp {
+                label,
                 celsius: self.read_temp(n).ok(),
             })
             .collect();
@@ -163,33 +173,24 @@ impl Chip {
             .map(|n| Pwm {
                 label: format!("pwm{n}"),
                 duty: self.read_attr(&format!("pwm{n}")),
-                enable: self
-                    .read_attr::<u8>(&format!("pwm{n}_enable"))
-                    .map(PwmEnable::from),
+                enable: self.read_pwm_enable(n).ok().flatten(),
             })
             .collect();
         Ok(pwms)
     }
 
-    /// The labels of all temperature inputs, in index order.
+    /// Every temperature input as (N in `tempN`, label), sorted by N.
+    /// Unlabelled inputs are labelled `tempN`, as `status` shows them.
     ///
     /// # Errors
     ///
     /// Fails when the chip's directory cannot be listed.
-    pub fn temp_labels(&self) -> io::Result<Vec<String>> {
+    pub fn temp_inputs(&self) -> io::Result<Vec<(u32, String)>> {
         let indices = self.attribute_indices("temp", "_input")?;
-        Ok(indices.into_iter().map(|n| self.temp_label(n)).collect())
-    }
-
-    /// N of the temperature input `tempN` labelled `label`, if there is one.
-    /// Unlabelled inputs answer to `tempN`, as `status` shows them.
-    ///
-    /// # Errors
-    ///
-    /// Fails when the chip's directory cannot be listed.
-    pub fn find_temp(&self, label: &str) -> io::Result<Option<u32>> {
-        let indices = self.attribute_indices("temp", "_input")?;
-        Ok(indices.into_iter().find(|&n| self.temp_label(n) == label))
+        Ok(indices
+            .into_iter()
+            .map(|n| (n, self.temp_label(n)))
+            .collect())
     }
 
     /// Reads `tempN_input` in °C.
@@ -208,11 +209,7 @@ impl Chip {
     ///
     /// Fails when the input exists but cannot be read.
     pub fn read_fan(&self, n: u32) -> io::Result<Option<u32>> {
-        let path = self.dir().join(format!("fan{n}_input"));
-        if !path.exists() {
-            return Ok(None);
-        }
-        sysfs::read_value(&path).map(Some)
+        sysfs::read_optional(&self.dir().join(format!("fan{n}_input")))
     }
 
     /// The numbers N of all PWM outputs `pwmN`.
@@ -383,14 +380,14 @@ mod tests {
     }
 
     #[test]
-    fn find_temp_matches_labels_and_fallback_names() {
+    fn temp_inputs_use_labels_or_fallback_names() {
         let sysfs = FakeSysfs::new();
         let chip = nct6798(&sysfs);
 
-        assert_eq!(chip.find_temp("SYSTIN").unwrap(), Some(1));
-        assert_eq!(chip.find_temp("temp2").unwrap(), Some(2));
-        assert_eq!(chip.find_temp("CPUTIN").unwrap(), None);
-        assert_eq!(chip.temp_labels().unwrap(), ["SYSTIN", "temp2"]);
+        assert_eq!(
+            chip.temp_inputs().unwrap(),
+            [(1, "SYSTIN".to_owned()), (2, "temp2".to_owned())]
+        );
     }
 
     #[test]

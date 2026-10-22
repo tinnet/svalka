@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use crate::sysfs;
 
-pub use control::{HandBack, ManualOverride, PwmState, automatic_mode, is_held};
+pub use control::{HandBack, ManualOverride, PwmState};
 pub use resolve::{ResolveError, resolve};
 pub use sensors::{ChipSnapshot, Fan, Pwm, PwmEnable, Temp};
 
@@ -27,6 +27,8 @@ pub struct Chip {
     name: String,
     /// Fully resolved path of the device the chip belongs to, if it has one.
     device: Option<PathBuf>,
+    /// Kernel driver of that device, e.g. `nct6775` for an nct6798.
+    driver: Option<String>,
 }
 
 impl Chip {
@@ -40,6 +42,9 @@ impl Chip {
             dir: dir.to_path_buf(),
             name: sysfs::read_string(&dir.join("name"))?,
             device: fs::canonicalize(dir.join("device")).ok(),
+            driver: fs::canonicalize(dir.join("device/driver"))
+                .ok()
+                .map(|driver| file_name_of(&driver)),
         })
     }
 
@@ -51,6 +56,18 @@ impl Chip {
     #[must_use]
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    /// The kernel driver, e.g. `nct6775`, if the chip has a device with one.
+    #[must_use]
+    pub fn driver(&self) -> Option<&str> {
+        self.driver.as_deref()
+    }
+
+    /// E.g. `nct6798 pwm2`: how every message names an output.
+    #[must_use]
+    pub fn describe_pwm(&self, n: u32) -> String {
+        format!("{} pwm{n}", self.name)
     }
 
     /// The chip's current `hwmonN` number. Only useful for display: it changes between boots.
