@@ -15,7 +15,7 @@ use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, anyhow};
+use anyhow::{Context, anyhow, bail};
 use onlycurves_core::controller::{FanController, Tick};
 use onlycurves_core::pwm;
 use onlycurves_core::state::{FanMode, FanSnapshot, Snapshot, VERSION};
@@ -35,6 +35,11 @@ const STALL_MIN_PERCENT: f64 = 30.0;
 /// Ticks of 0 rpm before a stall is reported. The nct6775 driver refreshes
 /// rpm only every 1.5–2 s, and a fan needs a moment to spin up.
 const STALL_TICKS: u32 = 5;
+
+/// Ticks in a row a fan's output may fail before the daemon gives up. A
+/// single EIO from the Super-I/O (e.g. around a resume) should not stop the
+/// daemon; an output that stays broken should.
+const MAX_OUTPUT_ERRORS: u32 = 10;
 
 /// How often a sleeping loop checks for signals.
 const SIGNAL_CHECK: Duration = Duration::from_millis(100);
@@ -250,6 +255,8 @@ struct FanLoop {
     in_failsafe: bool,
     interfered: bool,
     stalled_ticks: u32,
+    /// Ticks in a row in which reading or writing the output failed.
+    output_errors: u32,
 }
 
 fn take_over_fans(setup: &Setup) -> anyhow::Result<Vec<FanLoop>> {
@@ -382,6 +389,7 @@ impl FanLoop {
             in_failsafe: false,
             interfered: false,
             stalled_ticks: 0,
+            output_errors: 0,
         }
     }
 
@@ -401,7 +409,16 @@ impl FanLoop {
         let tick = self.controller.tick(sensors);
         self.report_failsafe(&tick);
         let raw = pwm::percent_to_raw(tick.duty);
-        let pwm_enable = self.write_duty(raw)?;
+        let pwm_enable = match self.write_duty(raw) {
+            Ok(pwm_enable) => {
+                self.output_recovered();
+                pwm_enable
+            }
+            Err(error) => {
+                self.output_failed(&error)?;
+                None
+            }
+        };
         let rpm = self.output.read_rpm().ok().flatten();
         self.check_stall(raw, rpm);
         Ok(self.snapshot(&tick, raw, pwm_enable, rpm))
@@ -416,6 +433,14 @@ impl FanLoop {
             .current()
             .with_context(|| format!("cannot read {label}"))?;
 
+        if self.output_errors > 0 {
+            // After a failed tick we do not know what the output holds.
+            self.manual
+                .reassert(raw)
+                .with_context(|| format!("cannot take back {label}"))?;
+            self.written = Some(raw);
+            return Ok(current.enable);
+        }
         if let Some(written) = self.written
             && !is_held(current, written)
         {
@@ -441,6 +466,36 @@ impl FanLoop {
             self.written = Some(raw);
         }
         Ok(current.enable)
+    }
+
+    /// Counts a tick in which the output could not be read or written. The
+    /// first one is logged; after [`MAX_OUTPUT_ERRORS`] in a row the daemon
+    /// gives up, so the chip's own curve and `restore` take over.
+    fn output_failed(&mut self, error: &anyhow::Error) -> anyhow::Result<()> {
+        self.output_errors += 1;
+        if self.output_errors == 1 {
+            log::warning(format!("{error:#}; retrying every tick"));
+        }
+        if self.output_errors >= MAX_OUTPUT_ERRORS {
+            bail!(
+                "{}: {} failed {MAX_OUTPUT_ERRORS} ticks in a row; giving up so the chip's \
+                 own curve takes over",
+                self.name,
+                self.output.describe()
+            );
+        }
+        Ok(())
+    }
+
+    fn output_recovered(&mut self) {
+        if self.output_errors > 0 {
+            log::info(format!(
+                "{}: {} works again",
+                self.name,
+                self.output.describe()
+            ));
+            self.output_errors = 0;
+        }
     }
 
     /// Logs entering and leaving failsafe, not every failsafe tick.
@@ -671,6 +726,38 @@ curve   = [[40, 40], [60, 60]]
         hand_back_all(fans);
 
         assert_eq!(pwm2(&sysfs).1, "5");
+    }
+
+    #[test]
+    fn an_output_error_is_retried_and_only_fatal_when_it_lasts() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (sysfs, setup) = fake_pc();
+        let mut fans = take_over_fans(&setup).unwrap();
+        tick(&setup.bindings, &mut fans).unwrap();
+        let pwm2_file = sysfs.hwmon_root().join("hwmon7/pwm2");
+        let set_mode =
+            |mode| fs::set_permissions(&pwm2_file, fs::Permissions::from_mode(mode)).unwrap();
+
+        // A curve change forces a write, which now fails.
+        set_mode(0o444);
+        fans[0].written = Some(0);
+        let snapshot = tick(&setup.bindings, &mut fans).unwrap();
+        assert_eq!(fans[0].output_errors, 1);
+        assert_eq!(snapshot.fans["cpu_cooler"].pwm_enable, None);
+
+        set_mode(0o644);
+        tick(&setup.bindings, &mut fans).unwrap();
+        assert_eq!(fans[0].output_errors, 0);
+        assert_eq!(pwm2(&sysfs), ("128".into(), "1".into()));
+
+        set_mode(0o444);
+        for _ in 1..MAX_OUTPUT_ERRORS {
+            fans[0].written = Some(0);
+            tick(&setup.bindings, &mut fans).unwrap();
+        }
+        fans[0].written = Some(0);
+        assert!(tick(&setup.bindings, &mut fans).is_err());
     }
 
     #[test]
