@@ -272,3 +272,67 @@ fn check_reports_a_missing_config() {
             "cannot read /nonexistent/onlycurves.toml",
         ));
 }
+
+#[test]
+fn identify_runs_the_fan_and_restores_its_output() {
+    let sysfs = FakeSysfs::this_pc();
+    let config = sysfs.config(&example_config());
+
+    sysfs
+        .onlycurves(&[
+            "--config",
+            config.to_str().unwrap(),
+            "identify",
+            "cpu_cooler",
+            "--seconds",
+            "1",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Running cpu_cooler (nct6798 pwm2) at 100 % for 1 s.",
+        ))
+        .stdout(predicate::str::contains("before       971 rpm"))
+        .stdout(predicate::str::contains("1 s          971 rpm"))
+        .stdout(predicate::str::contains(
+            "Restored nct6798 pwm2 to 120/255, manual (1).",
+        ))
+        .stdout(predicate::str::contains(
+            "No tachometer rose by 200 rpm or more.",
+        ));
+
+    let pwm2 = sysfs.hwmon_root().join("hwmon7/pwm2");
+    assert_eq!(fs::read_to_string(pwm2).unwrap().trim(), "120");
+}
+
+#[test]
+fn identify_lists_the_fans_when_the_name_is_unknown() {
+    let sysfs = FakeSysfs::this_pc();
+    let config = sysfs.config(&example_config());
+
+    sysfs
+        .onlycurves(&["--config", config.to_str().unwrap(), "identify", "intake"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "no fan named \"intake\" in the config; it has: cpu_cooler, exhaust",
+        ));
+}
+
+#[test]
+fn identify_explains_that_writing_needs_root() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let sysfs = FakeSysfs::this_pc();
+    let config = sysfs.config(&example_config());
+    let pwm1_enable = sysfs.hwmon_root().join("hwmon7/pwm1_enable");
+    fs::set_permissions(&pwm1_enable, fs::Permissions::from_mode(0o444)).unwrap();
+
+    sysfs
+        .onlycurves(&["--config", config.to_str().unwrap(), "identify", "exhaust"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "writing nct6798 pwm1 needs root; run this with sudo",
+        ));
+}

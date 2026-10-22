@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
-use onlycurves::{check, status};
+use onlycurves::{check, identify, signals, status};
 use shadow_rs::shadow;
 
 shadow!(build);
@@ -29,6 +29,8 @@ enum Command {
     Status(StatusArgs),
     /// Validate the config against this PC and show each fan's duty right now (read-only)
     Check,
+    /// Run one fan at 100 % for a few seconds, then restore it (needs root)
+    Identify(IdentifyArgs),
 }
 
 #[derive(Args)]
@@ -42,6 +44,16 @@ struct StatusArgs {
     path: Option<String>,
 }
 
+#[derive(Args)]
+struct IdentifyArgs {
+    /// Fan name from the config, e.g. exhaust
+    fan: String,
+
+    /// How long to run the fan at full speed
+    #[arg(long, default_value_t = 5)]
+    seconds: u64,
+}
+
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match &cli.command {
@@ -53,6 +65,20 @@ fn main() -> anyhow::Result<()> {
             print!("{}", status::run(&cli.hwmon_root, &filter)?);
         }
         Command::Check => print!("{}", check::run(&cli.config, &cli.hwmon_root)?),
+        Command::Identify(args) => {
+            let options = identify::Options {
+                fan: &args.fan,
+                seconds: args.seconds,
+            };
+            let stop = signals::stop_flag()?;
+            identify::run(
+                &cli.config,
+                &cli.hwmon_root,
+                &options,
+                &stop,
+                &mut std::io::stdout(),
+            )?;
+        }
     }
     Ok(())
 }

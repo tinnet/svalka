@@ -7,8 +7,8 @@ curves, write fan PWM. Replaces CoolerControl on an ASUS B550-I / Ryzen 7
 
 ## Status
 
-Milestones 1 and 2 of 6 are done: `status` and `check`. Both are read-only
-and need no root.
+Milestones 1–3 of 6 are done: `status`, `check` and `identify`. `status`
+and `check` are read-only and need no root; `identify` writes, briefly.
 
 ### `onlycurves status`
 
@@ -56,6 +56,29 @@ checked first, then the hardware: chips must resolve, labels and outputs must
 exist, `AUXTIN*` inputs are refused, and every sensor must read 0–125 °C.
 [`examples/onlycurves.toml`](examples/onlycurves.toml) documents the format.
 
+### `sudo onlycurves identify FAN`
+
+Runs one fan from the config at 100 % for 5 s (`--seconds N` to change),
+prints every tachometer on its chip once a second, then restores the output's
+duty and mode exactly. It shows which physical fan a `pwmN` drives (watch or
+listen) and which `fanN` reports it (the one that rises).
+
+```console
+$ sudo onlycurves --config examples/onlycurves.toml identify exhaust
+Running exhaust (nct6798 pwm1) at 100 % for 5 s. Watch or listen for the fan that speeds up.
+
+            fan1    fan2    fan5
+before       770    1370       0 rpm
+1 s         1510    1370       0 rpm
+...
+Restored nct6798 pwm1 to 77/255, manual (1).
+fan1 rose from 770 to 1890 rpm: pwm1 drives the fan that fan1 reports.
+```
+
+Stop CoolerControl first (`sudo systemctl stop coolercontrold`): if another
+program writes the output during the test, `identify` stops and restores it.
+Ctrl-C and SIGTERM also restore before exiting.
+
 ## Developing
 
 Toolchain and tasks come from [mise](https://mise.jdx.dev/):
@@ -85,6 +108,10 @@ crates/onlycurves/          the daemon and CLI (library + thin main.rs)
   src/binding.rs            tying config sensors and fans to real inputs/outputs
   src/status.rs             the `status` command
   src/check.rs              the `check` command
+  src/identify.rs           the `identify` command
+  src/setup.rs              load config + bind, shared by commands
+  src/signals.rs            SIGINT/SIGTERM -> a stop flag
+  src/hwmon/control.rs      manual PWM control that always restores
   src/sysfs.rs              reading one-value sysfs files
   tests/cli.rs              runs the binary against a fake sysfs tree
 examples/onlycurves.toml    the config for this PC
