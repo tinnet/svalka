@@ -129,6 +129,15 @@ pub struct Bindings {
     pub outputs: BTreeMap<String, BoundOutput>,
 }
 
+/// Every sensor's temperature by name, or `None` when it cannot be read.
+#[must_use]
+pub fn read_sensors(sensors: &BTreeMap<String, BoundSensor>) -> BTreeMap<String, Option<f64>> {
+    sensors
+        .iter()
+        .map(|(name, sensor)| (name.clone(), sensor.read_celsius().ok()))
+        .collect()
+}
+
 /// Ties every sensor and fan output in `config` to one of `chips`.
 ///
 /// # Errors

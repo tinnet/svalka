@@ -614,10 +614,11 @@ fn run_talks_to_systemd_and_reloads_on_sighup() {
         .spawn()
         .unwrap();
 
-    let ping = systemd.wait_for("WATCHDOG=1");
-    assert!(
-        ping.contains("STATUS=cpu_cooler 48 % (cpu 49.1 °C), exhaust 47 % (gpu 47.0 °C)"),
-        "{ping}"
+    systemd.wait_for("WATCHDOG=1");
+    let status = systemd.wait_for("STATUS=");
+    assert_eq!(
+        status,
+        "STATUS=cpu_cooler 48 % (cpu 49 °C), exhaust 47 % (gpu 47 °C)"
     );
     systemd.wait_for("READY=1");
 

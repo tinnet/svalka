@@ -51,16 +51,12 @@ impl Notifier {
         self.send(&format!("READY=1\nSTATUS={status}"));
     }
 
-    /// One tick went through: pets the watchdog and updates the status line.
-    pub fn tick(&self, status: &str) {
-        if self.watchdog {
-            self.send(&format!("WATCHDOG=1\nSTATUS={status}"));
-        } else {
-            self.send(&format!("STATUS={status}"));
-        }
+    /// Updates the status line `systemctl status` shows.
+    pub fn status(&self, status: &str) {
+        self.send(&format!("STATUS={status}"));
     }
 
-    /// Pets the watchdog without a status update, between ticks.
+    /// Pets the watchdog, if systemd set one.
     pub fn watchdog(&self) {
         if self.watchdog {
             self.send("WATCHDOG=1");
@@ -158,13 +154,11 @@ mod tests {
     }
 
     #[test]
-    fn ticks_pet_the_watchdog_only_when_one_is_set() {
-        let (_dir, listener, notifier) = systemd(true);
-        notifier.tick("cpu_cooler 47 %");
-        assert_eq!(receive(&listener), "WATCHDOG=1\nSTATUS=cpu_cooler 47 %");
-
+    fn sends_the_status_line() {
         let (_dir, listener, notifier) = systemd(false);
-        notifier.tick("cpu_cooler 47 %");
+
+        notifier.status("cpu_cooler 47 %");
+
         assert_eq!(receive(&listener), "STATUS=cpu_cooler 47 %");
     }
 

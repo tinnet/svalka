@@ -12,16 +12,16 @@ use std::fmt::Write as _;
 use std::mem;
 use std::path::Path;
 use std::sync::atomic::Ordering;
-use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, bail};
+use onlycurves_core::config::{Config, Fan};
 use onlycurves_core::controller::{FanController, Tick};
 use onlycurves_core::pwm;
 use onlycurves_core::state::{FanMode, FanSnapshot, Snapshot, VERSION};
 
-use crate::binding::{Bindings, BoundOutput};
-use crate::hwmon::{HandBack, ManualOverride, PwmEnable};
+use crate::binding::{self, BoundOutput, BoundSensor};
+use crate::hwmon::{HandBack, ManualOverride, PwmEnable, PwmState};
 use crate::log;
 use crate::notify::Notifier;
 use crate::record::{self, HeldOutput, OutputRecord};
@@ -48,9 +48,6 @@ const RELOAD_FAILED: &str = "reload failed, still running the previous config; s
 /// tick. Well under the unit's `WatchdogSec=10s`.
 const WATCHDOG_PET: Duration = Duration::from_secs(1);
 
-/// How often a sleeping loop checks for signals.
-const SIGNAL_CHECK: Duration = Duration::from_millis(100);
-
 /// Where `run` finds its config and hardware and puts its state.
 pub struct Paths<'a> {
     pub config: &'a Path,
@@ -69,26 +66,12 @@ pub struct Paths<'a> {
 pub fn run(paths: &Paths, signals: &DaemonSignals, notifier: &Notifier) -> anyhow::Result<()> {
     let setup = Setup::load(paths.config, paths.hwmon_root)?;
     let state_file = StateFile::prepare(paths.state_dir)?;
-    // Recorded before the takeover, so `restore` finds every output even if
-    // we die halfway through it.
-    let record = OutputRecord::in_dir(state_file.dir());
-    record
-        .write(&held_outputs(setup.bindings.outputs.values())?)
-        .with_context(|| format!("cannot write {}", record.path().display()))?;
-    let fans = take_over_fans(&setup)?;
-    let mut daemon = Daemon {
-        paths,
-        setup,
-        fans,
-        state_file,
-        record,
-        notifier,
-        state_write_failed: false,
-        status_note: None,
-    };
-    daemon.log_start();
+    let mut daemon = Daemon::new(paths, state_file, notifier);
 
-    let result = daemon.control_loop(signals);
+    let result = daemon.switch_to(setup).and_then(|()| {
+        daemon.log_start();
+        daemon.control_loop(signals)
+    });
     notifier.stopping();
     daemon.shut_down();
     result
@@ -97,15 +80,18 @@ pub fn run(paths: &Paths, signals: &DaemonSignals, notifier: &Notifier) -> anyho
 /// Everything the running loop owns.
 struct Daemon<'a> {
     paths: &'a Paths<'a>,
-    setup: Setup,
+    interval: Duration,
+    sensors: BTreeMap<String, BoundSensor>,
     fans: Vec<FanLoop>,
     state_file: StateFile,
     /// The outputs we hold, for `restore`.
     record: OutputRecord,
     notifier: &'a Notifier,
-    state_write_failed: bool,
+    state_write_failing: Episode,
     /// Appended to systemd's status line, e.g. after a failed reload.
     status_note: Option<&'static str>,
+    /// The status line systemd has, so it is only sent when it changes.
+    sent_status: String,
 }
 
 /// What ended a wait between ticks.
@@ -117,27 +103,38 @@ enum Wake {
     Reload,
 }
 
-impl Daemon<'_> {
+impl<'a> Daemon<'a> {
+    /// A daemon holding nothing yet; [`Daemon::switch_to`] gives it a config.
+    fn new(paths: &'a Paths<'a>, state_file: StateFile, notifier: &'a Notifier) -> Self {
+        Self {
+            paths,
+            interval: Duration::ZERO,
+            sensors: BTreeMap::new(),
+            fans: Vec::new(),
+            record: OutputRecord::in_dir(state_file.dir()),
+            state_file,
+            notifier,
+            state_write_failing: Episode::default(),
+            status_note: None,
+            sent_status: String::new(),
+        }
+    }
+
     fn log_start(&self) {
         log::info(format!(
             "controlling {} every {:?}; state in {}",
             fan_names(&self.fans),
-            self.setup.config.interval,
+            self.interval,
             self.state_file.path().display()
         ));
     }
 
     fn control_loop(&mut self, signals: &DaemonSignals) -> anyhow::Result<()> {
+        self.tick_and_publish()?;
+        self.notifier.ready(&self.sent_status);
         let mut next = Instant::now();
-        let mut ready = false;
         loop {
-            let status = self.tick_and_publish()?;
-            if !ready {
-                self.notifier.ready(&status);
-                ready = true;
-            }
-
-            next += self.setup.config.interval;
+            next += self.interval;
             match wait_until(next, signals, self.notifier) {
                 Wake::Tick => {}
                 Wake::Stop => {
@@ -151,22 +148,57 @@ impl Daemon<'_> {
             }
             // After a long stall (e.g. a debugger), restart the schedule instead of
             // running the missed ticks back to back.
-            if Instant::now() > next + self.setup.config.interval {
+            if Instant::now() > next + self.interval {
                 next = Instant::now();
             }
+            self.tick_and_publish()?;
         }
     }
 
-    /// One tick, then the state file and systemd's status. Returns the status line.
-    fn tick_and_publish(&mut self) -> anyhow::Result<String> {
-        let snapshot = tick(&self.setup.bindings, &mut self.fans)?;
-        write_state(&self.state_file, &snapshot, &mut self.state_write_failed);
-        let mut status = status_line(&snapshot);
-        if let Some(note) = self.status_note {
-            status = format!("{status} | {note}");
+    /// One tick, then the state file and systemd's watchdog and status.
+    fn tick_and_publish(&mut self) -> anyhow::Result<()> {
+        let sensors = binding::read_sensors(&self.sensors);
+        let mut fans = BTreeMap::new();
+        for fan in &mut self.fans {
+            fans.insert(fan.name.clone(), fan.tick(&sensors)?);
         }
-        self.notifier.tick(&status);
-        Ok(status)
+        let snapshot = Snapshot {
+            version: VERSION,
+            unix_millis: unix_millis(),
+            sensors,
+            fans,
+        };
+        self.write_state(&snapshot);
+        self.notifier.watchdog();
+        self.publish_status(&snapshot);
+        Ok(())
+    }
+
+    /// Writes the snapshot, logging a failure once rather than every tick:
+    /// controlling the fans matters more than publishing state.
+    fn write_state(&mut self, snapshot: &Snapshot) {
+        let result = self.state_file.write(snapshot);
+        match (self.state_write_failing.observe(result.is_err()), result) {
+            (Some(Edge::Began), Err(error)) => log::error(format!(
+                "cannot write {}: {error}",
+                self.state_file.path().display()
+            )),
+            (Some(Edge::Ended), _) => log::info("writing the state file works again"),
+            _ => {}
+        }
+    }
+
+    /// Sends the status line, but only when it changed: each change makes
+    /// systemd notify everything watching the unit.
+    fn publish_status(&mut self, snapshot: &Snapshot) {
+        let mut status = status_line(snapshot);
+        if let Some(note) = self.status_note {
+            let _ = write!(status, " | {note}");
+        }
+        if status != self.sent_status {
+            self.notifier.status(&status);
+            self.sent_status = status;
+        }
     }
 
     /// Loads the config again and switches to it. On any problem the running
@@ -195,17 +227,15 @@ impl Daemon<'_> {
         }
     }
 
-    /// Switches to `setup`. New outputs are taken over first, so if that fails
-    /// nothing has changed. Outputs in both configs stay in manual mode
-    /// throughout; outputs no longer configured are handed back.
+    /// Switches to `setup`, at startup (from no fans) and on reload. New
+    /// outputs are taken over first, so if that fails nothing has changed.
+    /// Outputs in both configs stay in manual mode throughout; outputs no
+    /// longer configured are handed back.
     fn switch_to(&mut self, setup: Setup) -> anyhow::Result<()> {
-        // While switching we may hold outputs of both configs.
+        // Recorded before any takeover, so `restore` finds every output even if
+        // we die halfway; while switching we may hold outputs of both configs.
         let running = self.fans.iter().map(|fan| &fan.output);
-        self.record
-            .write(&held_outputs(
-                running.chain(setup.bindings.outputs.values()),
-            )?)
-            .with_context(|| format!("cannot write {}", self.record.path().display()))?;
+        self.write_record(running.chain(setup.bindings.outputs.values()))?;
 
         let mut taken = BTreeMap::new();
         for (name, output) in &setup.bindings.outputs {
@@ -217,11 +247,7 @@ impl Daemon<'_> {
         let mut old = mem::take(&mut self.fans);
         for (name, fan) in &setup.config.fans {
             let output = setup.bindings.outputs[name].clone();
-            let controller = FanController::new(
-                fan.clone(),
-                setup.config.interval,
-                setup.config.failsafe_duty,
-            );
+            let controller = controller_for(&setup.config, fan);
             let fan_loop = if let Some(manual) = taken.remove(name) {
                 FanLoop::new(name, output, manual, controller)
             } else {
@@ -234,33 +260,91 @@ impl Daemon<'_> {
             self.fans.push(fan_loop);
         }
         hand_back_all(old);
-        self.setup = setup;
+        self.interval = setup.config.interval;
+        self.sensors = setup.bindings.sensors;
+
         // Only the new outputs now. If this fails the record lists a few
         // outputs too many, which `restore` handles fine.
-        let held = held_outputs(self.fans.iter().map(|fan| &fan.output))?;
-        if let Err(error) = self.record.write(&held) {
-            log::error(format!(
-                "cannot write {}: {error}",
-                self.record.path().display()
-            ));
+        let held = self.fans.iter().map(|fan| &fan.output);
+        if let Err(error) = self.write_record(held) {
+            log::error(format!("{error:#}"));
         }
         Ok(())
     }
 
+    fn write_record<'o>(
+        &self,
+        outputs: impl Iterator<Item = &'o BoundOutput>,
+    ) -> anyhow::Result<()> {
+        let held = outputs
+            .map(HeldOutput::of)
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        self.record
+            .write(&record::dedup(held))
+            .with_context(|| format!("cannot write {}", self.record.path().display()))
+    }
+
     fn shut_down(self) {
         hand_back_all(self.fans);
-        if let Err(error) = self.state_file.remove() {
-            log::error(format!(
-                "cannot remove {}: {error}",
-                self.state_file.path().display()
-            ));
+        let removals = [
+            (self.state_file.path(), self.state_file.remove()),
+            (self.record.path(), self.record.remove()),
+        ];
+        for (path, result) in removals {
+            if let Err(error) = result {
+                log::error(format!("cannot remove {}: {error}", path.display()));
+            }
         }
-        if let Err(error) = self.record.remove() {
-            log::error(format!(
-                "cannot remove {}: {error}",
-                self.record.path().display()
-            ));
+    }
+}
+
+/// A condition logged once when it begins and once when it ends, not on every
+/// tick in between: failsafe, interference, stalls, failing writes.
+#[derive(Debug, Clone, Copy)]
+struct Episode {
+    /// Ticks in a row the condition has held.
+    ticks: u32,
+    /// Ticks in a row it must hold before it counts as begun.
+    after: u32,
+}
+
+/// Where an [`Episode`] changed this tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Edge {
+    Began,
+    Ended,
+}
+
+impl Episode {
+    /// An episode that begins once its condition held for `ticks` ticks.
+    const fn after(ticks: u32) -> Self {
+        Self {
+            ticks: 0,
+            after: ticks,
         }
+    }
+
+    /// Records one tick in which the condition does or does not hold.
+    fn observe(&mut self, holds: bool) -> Option<Edge> {
+        if holds {
+            self.ticks += 1;
+            (self.ticks == self.after).then_some(Edge::Began)
+        } else {
+            let had_begun = self.ticks >= self.after;
+            self.ticks = 0;
+            had_begun.then_some(Edge::Ended)
+        }
+    }
+
+    fn is_active(self) -> bool {
+        self.ticks > 0
+    }
+}
+
+impl Default for Episode {
+    /// Begins on the first tick the condition holds.
+    fn default() -> Self {
+        Self::after(1)
     }
 }
 
@@ -268,31 +352,21 @@ impl Daemon<'_> {
 struct FanLoop {
     name: String,
     output: BoundOutput,
+    /// `output.describe()`, kept for the per-tick snapshot and messages.
+    description: String,
     manual: ManualOverride,
     controller: FanController,
     /// The raw duty we last wrote.
     written: Option<u8>,
-    in_failsafe: bool,
-    interfered: bool,
-    stalled_ticks: u32,
-    /// Ticks in a row in which reading or writing the output failed.
-    output_errors: u32,
+    failsafe: Episode,
+    interference: Episode,
+    stall: Episode,
+    /// Reading or writing the output failing, tick after tick.
+    output_errors: Episode,
 }
 
-fn take_over_fans(setup: &Setup) -> anyhow::Result<Vec<FanLoop>> {
-    let mut fans = Vec::new();
-    for (name, fan) in &setup.config.fans {
-        // `bind` succeeded, so every fan has an output.
-        let output = setup.bindings.outputs[name].clone();
-        let manual = take_over(&output)?;
-        let controller = FanController::new(
-            fan.clone(),
-            setup.config.interval,
-            setup.config.failsafe_duty,
-        );
-        fans.push(FanLoop::new(name, output, manual, controller));
-    }
-    Ok(fans)
+fn controller_for(config: &Config, fan: &Fan) -> FanController {
+    FanController::new(fan.clone(), config.interval, config.failsafe_duty)
 }
 
 /// Switches `output` to manual, to be handed back to the chip's automatic mode.
@@ -306,33 +380,8 @@ fn take_over(output: &BoundOutput) -> anyhow::Result<ManualOverride> {
     Ok(manual)
 }
 
-/// `outputs` as record entries, each physical output once.
-fn held_outputs<'a>(
-    outputs: impl Iterator<Item = &'a BoundOutput>,
-) -> anyhow::Result<Vec<HeldOutput>> {
-    let held = outputs
-        .map(HeldOutput::of)
-        .collect::<anyhow::Result<Vec<_>>>()?;
-    Ok(record::dedup(held))
-}
-
-/// One tick for every fan. Returns the snapshot to publish.
-fn tick(bindings: &Bindings, fans: &mut [FanLoop]) -> anyhow::Result<Snapshot> {
-    let sensors = read_sensors(bindings);
-    let mut snapshots = BTreeMap::new();
-    for fan in fans {
-        snapshots.insert(fan.name.clone(), fan.tick(&sensors)?);
-    }
-    Ok(Snapshot {
-        version: VERSION,
-        unix_millis: unix_millis(),
-        sensors,
-        fans: snapshots,
-    })
-}
-
-/// E.g. `cpu_cooler 48 % (cpu 49.1 °C), exhaust 100 % (failsafe)`, for
-/// `systemctl status`.
+/// E.g. `cpu_cooler 48 % (cpu 49 °C), exhaust 100 % (failsafe)`, for
+/// `systemctl status`. Whole degrees, so it does not change every tick.
 fn status_line(snapshot: &Snapshot) -> String {
     let mut line = String::new();
     for (name, fan) in &snapshot.fans {
@@ -343,7 +392,7 @@ fn status_line(snapshot: &Snapshot) -> String {
         match (fan.mode, &fan.source, fan.celsius) {
             (FanMode::Failsafe, _, _) => line += " (failsafe)",
             (FanMode::Normal, Some(source), Some(celsius)) => {
-                let _ = write!(line, " ({source} {celsius:.1} °C)");
+                let _ = write!(line, " ({source} {celsius:.0} °C)");
             }
             (FanMode::Normal, _, _) => {}
         }
@@ -358,15 +407,6 @@ fn fan_names(fans: &[FanLoop]) -> String {
         .join(", ")
 }
 
-/// Every sensor's temperature, or `None` when it cannot be read.
-fn read_sensors(bindings: &Bindings) -> BTreeMap<String, Option<f64>> {
-    bindings
-        .sensors
-        .iter()
-        .map(|(name, sensor)| (name.clone(), sensor.read_celsius().ok()))
-        .collect()
-}
-
 impl FanLoop {
     fn new(
         name: &str,
@@ -376,26 +416,24 @@ impl FanLoop {
     ) -> Self {
         Self {
             name: name.to_owned(),
+            description: output.describe(),
             output,
             manual,
             controller,
             written: None,
-            in_failsafe: false,
-            interfered: false,
-            stalled_ticks: 0,
-            output_errors: 0,
+            failsafe: Episode::default(),
+            interference: Episode::default(),
+            stall: Episode::after(STALL_TICKS),
+            output_errors: Episode::default(),
         }
     }
 
     /// The same output under a reloaded config: keeps the takeover and the duty
-    /// last written, takes the new name and controller.
+    /// last written, starts everything else afresh.
     fn renamed(self, name: &str, output: BoundOutput, controller: FanController) -> Self {
         Self {
-            name: name.to_owned(),
-            output,
-            controller,
-            in_failsafe: false,
-            ..self
+            written: self.written,
+            ..Self::new(name, output, self.manual, controller)
         }
     }
 
@@ -403,155 +441,117 @@ impl FanLoop {
         let tick = self.controller.tick(sensors);
         self.report_failsafe(&tick);
         let raw = pwm::percent_to_raw(tick.duty);
-        let pwm_enable = match self.write_duty(raw) {
-            Ok(pwm_enable) => {
-                self.output_recovered();
-                pwm_enable
-            }
-            Err(error) => {
-                self.output_failed(&error)?;
-                None
-            }
-        };
+        let pwm_enable = self.write_duty_or_count_failure(raw)?;
         let rpm = self.output.read_rpm().ok().flatten();
         self.check_stall(raw, rpm);
         Ok(self.snapshot(&tick, raw, pwm_enable, rpm))
     }
 
-    /// Writes `raw` if it differs from what we wrote last, first taking the
-    /// output back if something else changed it. Returns `pwmN_enable` as read.
+    /// [`FanLoop::write_duty`], tolerating a failing output for up to
+    /// [`MAX_OUTPUT_ERRORS`] ticks in a row; after that the daemon gives up,
+    /// so the chip's own curve and `restore` take over.
+    fn write_duty_or_count_failure(&mut self, raw: u8) -> anyhow::Result<Option<PwmEnable>> {
+        let result = self.write_duty(raw);
+        let edge = self.output_errors.observe(result.is_err());
+        match (&result, edge) {
+            (Err(error), Some(Edge::Began)) => {
+                log::warning(format!("{error:#}; retrying every tick"));
+            }
+            (Ok(_), Some(Edge::Ended)) => {
+                log::info(format!("{}: {} works again", self.name, self.description));
+            }
+            _ => {}
+        }
+        if self.output_errors.ticks >= MAX_OUTPUT_ERRORS {
+            bail!(
+                "{}: {} failed {MAX_OUTPUT_ERRORS} ticks in a row; giving up so the chip's \
+                 own curve takes over",
+                self.name,
+                self.description
+            );
+        }
+        Ok(result.unwrap_or(None))
+    }
+
+    /// Writes `raw` if it differs from what we wrote last. Takes the output
+    /// back first if something else changed it, or if the last tick failed and
+    /// we cannot know what it holds. Returns `pwmN_enable` as read.
     fn write_duty(&mut self, raw: u8) -> anyhow::Result<Option<PwmEnable>> {
         let current = self
             .manual
             .current()
             .with_context(|| format!("cannot read {}", self.label()))?;
+        let interfered = self
+            .written
+            .is_some_and(|written| !current.is_held_at(written));
+        self.report_interference(interfered, current);
 
-        if self.output_errors > 0 {
-            // After a failed tick we do not know what the output holds.
+        if interfered || self.output_errors.is_active() {
             self.manual
                 .reassert(raw)
                 .with_context(|| format!("cannot take back {}", self.label()))?;
-            self.written = Some(raw);
-            return Ok(current.enable);
-        }
-        if let Some(written) = self.written
-            && !current.is_held_at(written)
-        {
-            self.report_interference(&format!("{current}"));
-            self.manual
-                .reassert(raw)
-                .with_context(|| format!("cannot take back {}", self.label()))?;
-            self.written = Some(raw);
-            return Ok(current.enable);
-        }
-        if self.interfered {
-            log::info(format!(
-                "{}: {} is ours again",
-                self.name,
-                self.output.describe()
-            ));
-            self.interfered = false;
-        }
-        if self.written != Some(raw) {
+        } else if self.written != Some(raw) {
             self.manual
                 .set(raw)
                 .with_context(|| format!("cannot write {}", self.label()))?;
-            self.written = Some(raw);
         }
+        self.written = Some(raw);
         Ok(current.enable)
     }
 
     /// E.g. `cpu_cooler: nct6798 pwm2`, for error messages.
     fn label(&self) -> String {
-        format!("{}: {}", self.name, self.output.describe())
+        format!("{}: {}", self.name, self.description)
     }
 
-    /// Counts a tick in which the output could not be read or written. The
-    /// first one is logged; after [`MAX_OUTPUT_ERRORS`] in a row the daemon
-    /// gives up, so the chip's own curve and `restore` take over.
-    fn output_failed(&mut self, error: &anyhow::Error) -> anyhow::Result<()> {
-        self.output_errors += 1;
-        if self.output_errors == 1 {
-            log::warning(format!("{error:#}; retrying every tick"));
-        }
-        if self.output_errors >= MAX_OUTPUT_ERRORS {
-            bail!(
-                "{}: {} failed {MAX_OUTPUT_ERRORS} ticks in a row; giving up so the chip's \
-                 own curve takes over",
-                self.name,
-                self.output.describe()
-            );
-        }
-        Ok(())
-    }
-
-    fn output_recovered(&mut self) {
-        if self.output_errors > 0 {
-            log::info(format!(
-                "{}: {} works again",
-                self.name,
-                self.output.describe()
-            ));
-            self.output_errors = 0;
-        }
-    }
-
-    /// Logs entering and leaving failsafe, not every failsafe tick.
     fn report_failsafe(&mut self, tick: &Tick) {
-        match (&tick.failsafe, self.in_failsafe) {
-            (Some(reason), false) => {
+        match (
+            self.failsafe.observe(tick.failsafe.is_some()),
+            &tick.failsafe,
+        ) {
+            (Some(Edge::Began), Some(reason)) => {
                 log::warning(format!(
                     "{}: {reason}; running at {:.0} %",
                     self.name, tick.duty
                 ));
-                self.in_failsafe = true;
             }
-            (None, true) => {
+            (Some(Edge::Ended), _) => {
                 log::info(format!(
                     "{}: sensors read normally again; back on the curve",
                     self.name
                 ));
-                self.in_failsafe = false;
             }
             _ => {}
         }
     }
 
-    /// Logs the first tick of each episode in which another program (or a
-    /// resume from suspend) changed the output.
-    fn report_interference(&mut self, found: &str) {
-        if !self.interfered {
-            log::warning(format!(
+    /// Another program, or a resume from suspend, changed the output.
+    fn report_interference(&mut self, interfered: bool, found: PwmState) {
+        match self.interference.observe(interfered) {
+            Some(Edge::Began) => log::warning(format!(
                 "{}: {} changed to {found} behind our back (resume from suspend, or another \
                  program such as CoolerControl); taking it back",
-                self.name,
-                self.output.describe()
-            ));
-            self.interfered = true;
+                self.name, self.description
+            )),
+            Some(Edge::Ended) => {
+                log::info(format!("{}: {} is ours again", self.name, self.description));
+            }
+            None => {}
         }
     }
 
     /// Warns once when the tachometer reads 0 rpm for [`STALL_TICKS`] ticks at
     /// a duty that should turn the fan.
     fn check_stall(&mut self, raw: u8, rpm: Option<u32>) {
-        let should_spin = raw >= pwm::percent_to_raw(STALL_MIN_PERCENT);
-        match rpm {
-            Some(0) if should_spin => {
-                self.stalled_ticks += 1;
-                if self.stalled_ticks == STALL_TICKS {
-                    log::warning(format!(
-                        "{}: 0 rpm at {} % for {STALL_TICKS} ticks; the fan may be stalled or unplugged",
-                        self.name,
-                        pwm::raw_to_percent(raw)
-                    ));
-                }
-            }
-            _ => {
-                if self.stalled_ticks >= STALL_TICKS {
-                    log::info(format!("{}: spinning again", self.name));
-                }
-                self.stalled_ticks = 0;
-            }
+        let stalled = rpm == Some(0) && raw >= pwm::percent_to_raw(STALL_MIN_PERCENT);
+        match self.stall.observe(stalled) {
+            Some(Edge::Began) => log::warning(format!(
+                "{}: 0 rpm at {} % for {STALL_TICKS} ticks; the fan may be stalled or unplugged",
+                self.name,
+                pwm::raw_to_percent(raw)
+            )),
+            Some(Edge::Ended) => log::info(format!("{}: spinning again", self.name)),
+            None => {}
         }
     }
 
@@ -563,7 +563,7 @@ impl FanLoop {
         rpm: Option<u32>,
     ) -> FanSnapshot {
         FanSnapshot {
-            output: self.output.describe(),
+            output: self.description.clone(),
             mode: if tick.failsafe.is_some() {
                 FanMode::Failsafe
             } else {
@@ -581,36 +581,12 @@ impl FanLoop {
     }
 }
 
-/// Writes the snapshot, logging a failure once rather than every tick:
-/// controlling the fans matters more than publishing state.
-fn write_state(state_file: &StateFile, snapshot: &Snapshot, failed: &mut bool) {
-    match (state_file.write(snapshot), *failed) {
-        (Ok(()), true) => {
-            log::info("writing the state file works again");
-            *failed = false;
-        }
-        (Err(error), false) => {
-            log::error(format!(
-                "cannot write {}: {error}",
-                state_file.path().display()
-            ));
-            *failed = true;
-        }
-        // Still working, or still failing: nothing new to say.
-        (Ok(()), false) | (Err(_), true) => {}
-    }
-}
-
-/// Sleeps until `deadline`, waking early for a stop or reload signal. A
+/// Sleeps until `deadline`, waking at once for a stop or reload signal. A
 /// reload request is consumed. Pets the watchdog every [`WATCHDOG_PET`]
 /// meanwhile, so a long `interval` cannot trip it; a hung tick still does.
 fn wait_until(deadline: Instant, signals: &DaemonSignals, notifier: &Notifier) -> Wake {
     let mut last_pet = Instant::now();
     loop {
-        if last_pet.elapsed() >= WATCHDOG_PET {
-            notifier.watchdog();
-            last_pet = Instant::now();
-        }
         if signals.stop.load(Ordering::Relaxed) {
             return Wake::Stop;
         }
@@ -621,18 +597,24 @@ fn wait_until(deadline: Instant, signals: &DaemonSignals, notifier: &Notifier) -
         if now >= deadline {
             return Wake::Tick;
         }
-        thread::sleep((deadline - now).min(SIGNAL_CHECK));
+        if now - last_pet >= WATCHDOG_PET {
+            notifier.watchdog();
+            last_pet = now;
+        }
+        signals.sleep((deadline - now).min(WATCHDOG_PET));
     }
 }
 
 fn hand_back_all(fans: Vec<FanLoop>) {
     for fan in fans {
-        let describe = fan.output.describe();
         match fan.manual.hand_back() {
-            Ok(()) => log::info(format!("{}: handed {describe} back to the chip", fan.name)),
+            Ok(()) => log::info(format!(
+                "{}: handed {} back to the chip",
+                fan.name, fan.description
+            )),
             Err(error) => log::error(format!(
-                "{}: could not hand back {describe}: {error}",
-                fan.name
+                "{}: could not hand back {}: {error}",
+                fan.name, fan.description
             )),
         }
     }
@@ -648,6 +630,7 @@ fn unix_millis() -> u64 {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::os::unix::fs::PermissionsExt;
 
     use super::*;
     use crate::hwmon::testing::FakeSysfs;
@@ -662,8 +645,9 @@ sources = ["cpu"]
 curve   = [[40, 40], [60, 60]]
 "#;
 
-    /// A fake PC with the CPU at 50 °C (-> 50 % -> raw 128) and pwm2 in SmartFan IV.
-    fn fake_pc() -> (FakeSysfs, Setup) {
+    /// A fake PC with the CPU at 50 °C (-> 50 % -> raw 128) and both nct6798
+    /// outputs in SmartFan IV.
+    fn fake_pc() -> FakeSysfs {
         let sysfs = FakeSysfs::new();
         sysfs
             .chip("hwmon3", "k10temp", "pci0000:00/0000:00:18.3")
@@ -677,161 +661,19 @@ curve   = [[40, 40], [60, 60]]
             .attr("pwm2", "98")
             .attr("pwm2_enable", "5")
             .attr("fan2_input", "1036");
-        let config = sysfs.hwmon_root().join("../../onlycurves.toml");
-        fs::write(&config, CONFIG).unwrap();
-        let setup = Setup::load(&config, &sysfs.hwmon_root()).unwrap();
-        (sysfs, setup)
+        write_config(&sysfs, CONFIG);
+        sysfs
     }
 
-    fn pwm2(sysfs: &FakeSysfs) -> (String, String) {
-        let read = |file: &str| {
-            fs::read_to_string(sysfs.hwmon_root().join("hwmon7").join(file))
-                .unwrap()
-                .trim()
-                .to_owned()
-        };
-        (read("pwm2"), read("pwm2_enable"))
+    fn config_path(sysfs: &FakeSysfs) -> std::path::PathBuf {
+        sysfs.hwmon_root().join("../../onlycurves.toml")
     }
 
-    #[test]
-    fn a_tick_writes_the_curve_duty_and_publishes_it() {
-        let (sysfs, setup) = fake_pc();
-        let mut fans = take_over_fans(&setup).unwrap();
-
-        let snapshot = tick(&setup.bindings, &mut fans).unwrap();
-
-        assert_eq!(pwm2(&sysfs), ("128".into(), "1".into()));
-        let fan = &snapshot.fans["cpu_cooler"];
-        assert_eq!(
-            (fan.pwm_raw, fan.rpm, fan.mode),
-            (128, Some(1036), FanMode::Normal)
-        );
+    fn write_config(sysfs: &FakeSysfs, text: &str) {
+        fs::write(config_path(sysfs), text).unwrap();
     }
 
-    #[test]
-    fn an_output_switched_away_is_taken_back() {
-        let (sysfs, setup) = fake_pc();
-        let mut fans = take_over_fans(&setup).unwrap();
-        tick(&setup.bindings, &mut fans).unwrap();
-
-        // What a resume from suspend can do: the BIOS takes the output back.
-        fans[0]
-            .output
-            .chip()
-            .write_pwm_enable(2, PwmEnable::Automatic(5))
-            .unwrap();
-        tick(&setup.bindings, &mut fans).unwrap();
-
-        assert_eq!(pwm2(&sysfs), ("128".into(), "1".into()));
-        assert!(fans[0].interfered);
-    }
-
-    #[test]
-    fn hand_back_returns_outputs_to_the_chip() {
-        let (sysfs, setup) = fake_pc();
-        let mut fans = take_over_fans(&setup).unwrap();
-        tick(&setup.bindings, &mut fans).unwrap();
-
-        hand_back_all(fans);
-
-        assert_eq!(pwm2(&sysfs).1, "5");
-    }
-
-    #[test]
-    fn an_output_error_is_retried_and_only_fatal_when_it_lasts() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let (sysfs, setup) = fake_pc();
-        let mut fans = take_over_fans(&setup).unwrap();
-        tick(&setup.bindings, &mut fans).unwrap();
-        let pwm2_file = sysfs.hwmon_root().join("hwmon7/pwm2");
-        let set_mode =
-            |mode| fs::set_permissions(&pwm2_file, fs::Permissions::from_mode(mode)).unwrap();
-
-        // A curve change forces a write, which now fails.
-        set_mode(0o444);
-        fans[0].written = Some(0);
-        let snapshot = tick(&setup.bindings, &mut fans).unwrap();
-        assert_eq!(fans[0].output_errors, 1);
-        assert_eq!(snapshot.fans["cpu_cooler"].pwm_enable, None);
-
-        set_mode(0o644);
-        tick(&setup.bindings, &mut fans).unwrap();
-        assert_eq!(fans[0].output_errors, 0);
-        assert_eq!(pwm2(&sysfs), ("128".into(), "1".into()));
-
-        set_mode(0o444);
-        for _ in 1..MAX_OUTPUT_ERRORS {
-            fans[0].written = Some(0);
-            tick(&setup.bindings, &mut fans).unwrap();
-        }
-        fans[0].written = Some(0);
-        assert!(tick(&setup.bindings, &mut fans).is_err());
-    }
-
-    #[test]
-    fn a_stall_counts_only_at_a_duty_that_should_spin() {
-        let (_sysfs, setup) = fake_pc();
-        let mut fans = take_over_fans(&setup).unwrap();
-        let fan = &mut fans[0];
-
-        fan.check_stall(pwm::percent_to_raw(20.0), Some(0));
-        assert_eq!(fan.stalled_ticks, 0);
-
-        for _ in 0..STALL_TICKS {
-            fan.check_stall(pwm::percent_to_raw(50.0), Some(0));
-        }
-        assert_eq!(fan.stalled_ticks, STALL_TICKS);
-
-        fan.check_stall(pwm::percent_to_raw(50.0), Some(800));
-        assert_eq!(fan.stalled_ticks, 0);
-    }
-
-    #[test]
-    fn wait_until_wakes_for_signals_and_deadlines() {
-        let far = Instant::now() + Duration::from_secs(60);
-        let signals = DaemonSignals::unregistered();
-
-        signals.reload.store(true, Ordering::Relaxed);
-        let notifier = Notifier::disabled();
-        assert_eq!(wait_until(far, &signals, &notifier), Wake::Reload);
-        assert!(
-            !signals.reload.load(Ordering::Relaxed),
-            "the request is consumed"
-        );
-
-        assert_eq!(wait_until(Instant::now(), &signals, &notifier), Wake::Tick);
-
-        signals.stop.store(true, Ordering::Relaxed);
-        assert_eq!(wait_until(far, &signals, &notifier), Wake::Stop);
-    }
-
-    /// Runs `test` on a daemon for the fake PC's `CONFIG`, after one tick.
-    fn with_daemon(test: impl FnOnce(&FakeSysfs, &mut Daemon)) {
-        let (sysfs, setup) = fake_pc();
-        let shm = tempfile::tempdir_in("/dev/shm").unwrap();
-        let config = sysfs.hwmon_root().join("../../onlycurves.toml");
-        let hwmon_root = sysfs.hwmon_root();
-        let paths = Paths {
-            config: &config,
-            hwmon_root: &hwmon_root,
-            state_dir: shm.path(),
-        };
-        let notifier = Notifier::disabled();
-        let mut daemon = Daemon {
-            paths: &paths,
-            fans: take_over_fans(&setup).unwrap(),
-            setup,
-            state_file: StateFile::prepare(shm.path()).unwrap(),
-            record: OutputRecord::in_dir(shm.path()),
-            notifier: &notifier,
-            state_write_failed: false,
-            status_note: None,
-        };
-        daemon.tick_and_publish().unwrap();
-        test(&sysfs, &mut daemon);
-    }
-
+    /// One attribute of the fake nct6798.
     fn attribute(sysfs: &FakeSysfs, file: &str) -> String {
         fs::read_to_string(sysfs.hwmon_root().join("hwmon7").join(file))
             .unwrap()
@@ -839,14 +681,166 @@ curve   = [[40, 40], [60, 60]]
             .to_owned()
     }
 
-    fn rewrite_config(sysfs: &FakeSysfs, text: &str) {
-        fs::write(sysfs.hwmon_root().join("../../onlycurves.toml"), text).unwrap();
+    fn pwm2(sysfs: &FakeSysfs) -> (String, String) {
+        (attribute(sysfs, "pwm2"), attribute(sysfs, "pwm2_enable"))
+    }
+
+    /// Runs `test` on a daemon started on the fake PC's `CONFIG`, after one tick.
+    fn with_daemon(test: impl FnOnce(&FakeSysfs, &mut Daemon)) {
+        let sysfs = fake_pc();
+        let shm = tempfile::tempdir_in("/dev/shm").unwrap();
+        let config = config_path(&sysfs);
+        let hwmon_root = sysfs.hwmon_root();
+        let paths = Paths {
+            config: &config,
+            hwmon_root: &hwmon_root,
+            state_dir: shm.path(),
+        };
+        let notifier = Notifier::disabled();
+        let mut daemon = Daemon::new(&paths, StateFile::prepare(shm.path()).unwrap(), &notifier);
+        daemon
+            .switch_to(Setup::load(&config, &hwmon_root).unwrap())
+            .unwrap();
+        daemon.tick_and_publish().unwrap();
+        test(&sysfs, &mut daemon);
+    }
+
+    #[test]
+    fn a_tick_writes_the_curve_duty_and_publishes_it() {
+        with_daemon(|sysfs, daemon| {
+            assert_eq!(pwm2(sysfs), ("128".into(), "1".into()));
+            let snapshot =
+                Snapshot::from_json(&fs::read_to_string(daemon.state_file.path()).unwrap())
+                    .unwrap();
+            let fan = &snapshot.fans["cpu_cooler"];
+            assert_eq!(
+                (fan.pwm_raw, fan.rpm, fan.mode),
+                (128, Some(1036), FanMode::Normal)
+            );
+            assert_eq!(daemon.sent_status, "cpu_cooler 50 % (cpu 50 °C)");
+        });
+    }
+
+    #[test]
+    fn an_output_switched_away_is_taken_back() {
+        with_daemon(|sysfs, daemon| {
+            // What a resume from suspend can do: the BIOS takes the output back.
+            daemon.fans[0]
+                .output
+                .chip()
+                .write_pwm_enable(2, PwmEnable::Automatic(5))
+                .unwrap();
+            daemon.tick_and_publish().unwrap();
+
+            assert_eq!(pwm2(sysfs), ("128".into(), "1".into()));
+            assert!(daemon.fans[0].interference.is_active());
+        });
+    }
+
+    #[test]
+    fn shutting_down_hands_outputs_back_and_cleans_up() {
+        with_daemon(|sysfs, daemon| {
+            let state = daemon.state_file.path().to_path_buf();
+            let record = daemon.record.path().to_path_buf();
+            assert!(state.exists() && record.exists());
+
+            let daemon = mem::replace(
+                daemon,
+                Daemon::new(daemon.paths, daemon.state_file.clone(), daemon.notifier),
+            );
+            daemon.shut_down();
+
+            assert_eq!(pwm2(sysfs).1, "5");
+            assert!(!state.exists() && !record.exists());
+        });
+    }
+
+    #[test]
+    fn an_output_error_is_retried_and_only_fatal_when_it_lasts() {
+        with_daemon(|sysfs, daemon| {
+            let pwm2_file = sysfs.hwmon_root().join("hwmon7/pwm2");
+            let set_mode =
+                |mode| fs::set_permissions(&pwm2_file, fs::Permissions::from_mode(mode)).unwrap();
+
+            // A changed duty forces a write, which now fails.
+            set_mode(0o444);
+            daemon.fans[0].written = Some(0);
+            daemon.tick_and_publish().unwrap();
+            assert_eq!(daemon.fans[0].output_errors.ticks, 1);
+
+            set_mode(0o644);
+            daemon.tick_and_publish().unwrap();
+            assert!(!daemon.fans[0].output_errors.is_active());
+            assert_eq!(pwm2(sysfs), ("128".into(), "1".into()));
+
+            set_mode(0o444);
+            for _ in 1..MAX_OUTPUT_ERRORS {
+                daemon.fans[0].written = Some(0);
+                daemon.tick_and_publish().unwrap();
+            }
+            daemon.fans[0].written = Some(0);
+            assert!(daemon.tick_and_publish().is_err());
+        });
+    }
+
+    #[test]
+    fn a_stall_counts_only_at_a_duty_that_should_spin() {
+        with_daemon(|_sysfs, daemon| {
+            let fan = &mut daemon.fans[0];
+
+            fan.check_stall(pwm::percent_to_raw(20.0), Some(0));
+            assert!(!fan.stall.is_active());
+
+            for _ in 0..STALL_TICKS {
+                fan.check_stall(pwm::percent_to_raw(50.0), Some(0));
+            }
+            assert_eq!(fan.stall.ticks, STALL_TICKS);
+
+            fan.check_stall(pwm::percent_to_raw(50.0), Some(800));
+            assert!(!fan.stall.is_active());
+        });
+    }
+
+    #[test]
+    fn an_episode_begins_after_its_ticks_and_ends_once() {
+        let mut stall = Episode::after(3);
+
+        assert_eq!(stall.observe(true), None);
+        assert_eq!(stall.observe(true), None);
+        assert_eq!(stall.observe(true), Some(Edge::Began));
+        assert_eq!(stall.observe(true), None);
+        assert_eq!(stall.observe(false), Some(Edge::Ended));
+        assert_eq!(stall.observe(false), None);
+
+        let mut short = Episode::after(3);
+        short.observe(true);
+        assert_eq!(short.observe(false), None, "never began, so never ends");
+    }
+
+    #[test]
+    fn wait_until_wakes_for_signals_and_deadlines() {
+        let far = Instant::now() + Duration::from_secs(60);
+        let signals = DaemonSignals::unregistered().unwrap();
+        let notifier = Notifier::disabled();
+
+        signals.reload.store(true, Ordering::Relaxed);
+        assert_eq!(wait_until(far, &signals, &notifier), Wake::Reload);
+        assert!(
+            !signals.reload.load(Ordering::Relaxed),
+            "the request is consumed"
+        );
+
+        let soon = Instant::now() + Duration::from_millis(20);
+        assert_eq!(wait_until(soon, &signals, &notifier), Wake::Tick);
+
+        signals.stop.store(true, Ordering::Relaxed);
+        assert_eq!(wait_until(far, &signals, &notifier), Wake::Stop);
     }
 
     #[test]
     fn reload_applies_a_new_curve_without_letting_go() {
         with_daemon(|sysfs, daemon| {
-            rewrite_config(
+            write_config(
                 sysfs,
                 &CONFIG.replace("[[40, 40], [60, 60]]", "[[40, 80], [60, 100]]"),
             );
@@ -869,7 +863,7 @@ curve   = [[40, 40], [60, 60]]
     #[test]
     fn reload_hands_back_removed_fans_and_takes_new_ones() {
         with_daemon(|sysfs, daemon| {
-            rewrite_config(
+            write_config(
                 sysfs,
                 &CONFIG
                     .replace("[fan.cpu_cooler]", "[fan.exhaust]")
@@ -887,16 +881,21 @@ curve   = [[40, 40], [60, 60]]
     #[test]
     fn a_broken_config_keeps_the_running_one() {
         with_daemon(|sysfs, daemon| {
-            rewrite_config(
+            write_config(
                 sysfs,
                 &CONFIG.replace("[[40, 40], [60, 60]]", "[[60, 40], [40, 60]]"),
             );
 
             daemon.reload();
+            daemon.tick_and_publish().unwrap();
 
             assert_eq!(fan_names(&daemon.fans), "cpu_cooler");
             assert_eq!(attribute(sysfs, "pwm2_enable"), "1");
-            assert_eq!(daemon.status_note, Some(RELOAD_FAILED));
+            assert!(
+                daemon.sent_status.ends_with(RELOAD_FAILED),
+                "{}",
+                daemon.sent_status
+            );
         });
     }
 
@@ -929,7 +928,7 @@ curve   = [[40, 40], [60, 60]]
 
         assert_eq!(
             status_line(&snapshot),
-            "cpu_cooler 48 % (cpu 49.1 °C), exhaust 100 % (failsafe)"
+            "cpu_cooler 48 % (cpu 49 °C), exhaust 100 % (failsafe)"
         );
     }
 }
