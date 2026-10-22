@@ -1,0 +1,31 @@
+[Unit]
+Description=onlycurves fan control
+Documentation=https://github.com/tinnet/onlycurves
+After=systemd-modules-load.service
+# Both would write the same PWM outputs.
+Conflicts=coolercontrold.service
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/onlycurves run
+ExecReload=/bin/kill -HUP $MAINPID
+# Runs after every stop, including SIGKILL and panics: hands the fans back
+# to the chip's own curve.
+ExecStopPost=/usr/local/bin/onlycurves restore
+WatchdogSec=10s
+Restart=on-failure
+RestartSec=2s
+RuntimeDirectory=onlycurves
+RuntimeDirectoryMode=0755
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+MemoryDenyWriteExecute=yes
+# Deliberately not ProtectKernelTunables=: it makes /sys read-only, and the
+# fans are controlled through /sys.
+
+[Install]
+WantedBy=multi-user.target

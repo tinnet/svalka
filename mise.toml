@@ -35,6 +35,16 @@ description = "Show every temperature, fan and PWM"
 run = "cargo run --quiet -- --config examples/onlycurves.toml check"
 description = "Check the example config against this PC"
 
+[tasks.install]
+description = "Install the binary and systemd unit (sudo); keeps an existing /etc/onlycurves.toml"
+depends = ["package"]
+run = [
+  "sudo install -Dm755 target/release/onlycurves /usr/local/bin/onlycurves",
+  "sudo install -Dm644 dist/onlycurves.service /etc/systemd/system/onlycurves.service",
+  "test -e /etc/onlycurves.toml || sudo install -Dm644 examples/onlycurves.toml /etc/onlycurves.toml",
+  "sudo systemctl daemon-reload",
+]
+
 [tasks.scan-secrets]
 run = "betterleaks git --pre-commit --staged"
 description = "Scan for secrets in staged changes (pre-commit)"

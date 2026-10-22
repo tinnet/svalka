@@ -7,9 +7,9 @@ curves, write fan PWM. Replaces CoolerControl on an ASUS B550-I / Ryzen 7
 
 ## Status
 
-Milestones 1–4 of 7 are done: `status`, `check`, `identify` and `run`
-(with `restore`). `status` and `check` are read-only and need no root; the
-others write to the fans.
+Milestones 1–4 and 6 of 7 are done: `status`, `check`, `identify`, `run`
+(with `restore`) and the systemd service. `sweep` (5) is postponed. `status`
+and `check` are read-only and need no root; the others write to the fans.
 
 ### `onlycurves status`
 
@@ -98,8 +98,9 @@ it (`smoothing`), holds small drops (`hysteresis`), applies the curve and
 - If the output is switched away (resume from suspend, another program), it
   logs that once and takes it back.
 - A fan reading 0 rpm at 30 % or more for 5 ticks is logged as stalled.
-- Ctrl-C, SIGTERM and SIGHUP stop it. On exit, and on errors, every output
-  goes back to the chip's own SmartFan IV curve (`pwmN_enable = 5`).
+- Ctrl-C and SIGTERM stop it; SIGHUP reloads the config. On exit, and on
+  errors, every output goes back to the chip's own SmartFan IV curve
+  (`pwmN_enable = 5`).
 - Logs go to stderr: plain in a terminal, with journald priorities under
   systemd.
 
@@ -108,6 +109,25 @@ it (`smoothing`), holds small drops (`hysteresis`), applies the curve and
 Hands every configured output back to the chip's own curve. systemd runs it
 after `run` exits for any reason, including `kill -9`. It only needs the
 config's outputs, so a broken sensor cannot block it.
+
+### As a systemd service
+
+```console
+$ mise run install                       # binary, unit, and /etc/onlycurves.toml if missing
+$ sudo systemctl disable --now coolercontrold
+$ sudo systemctl enable --now onlycurves
+$ systemctl status onlycurves            # Status: line shows each fan's duty and driver
+$ sudo systemctl reload onlycurves       # after editing /etc/onlycurves.toml
+$ journalctl -u onlycurves -f
+```
+
+[`dist/onlycurves.service`](dist/onlycurves.service) runs `onlycurves run` as
+`Type=notify`: it reports ready after the first tick, pets a 10 s watchdog
+every tick, and shows each fan's duty as its status. `systemctl reload` sends
+SIGHUP: the new config is checked against the hardware first, and if it fails
+the running one stays (see the journal). `ExecStopPost` runs `restore` after
+every stop, so the fans go back to the chip's own curve even after `kill -9`.
+`Conflicts=coolercontrold.service` keeps the two from fighting.
 
 ## Developing
 
@@ -121,6 +141,7 @@ Toolchain and tasks come from [mise](https://mise.jdx.dev/):
 | `mise run fmt` | Format |
 | `mise run status` | `cargo run -- status` |
 | `mise run check` | `check` with `examples/onlycurves.toml` |
+| `mise run install` | Release build, then install binary + unit (sudo) |
 
 ## Layout
 
@@ -145,12 +166,14 @@ crates/onlycurves/          the daemon and CLI (library + thin main.rs)
   src/restore.rs            the `restore` command
   src/statefile.rs          state.json, tmpfs only, atomic writes
   src/log.rs                stderr logging, journald priorities under systemd
+  src/notify.rs             sd_notify: READY, STATUS, WATCHDOG, RELOADING
   src/setup.rs              load config + bind, shared by commands
-  src/signals.rs            SIGINT/SIGTERM -> a stop flag
+  src/signals.rs            SIGINT/SIGTERM -> stop, SIGHUP -> reload
   src/hwmon/control.rs      manual PWM control that always restores
   src/sysfs.rs              reading one-value sysfs files
   tests/cli.rs              runs the binary against a fake sysfs tree
 examples/onlycurves.toml    the config for this PC
+dist/onlycurves.service     the systemd unit
 ```
 
 `onlycurves-tui` joins the workspace later.
