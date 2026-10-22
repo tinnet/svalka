@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
-use onlycurves::{check, identify, restore, run, signals, status};
+use onlycurves::{check, identify, notify, restore, run, signals, status};
 use shadow_rs::shadow;
 
 shadow!(build);
@@ -88,8 +88,14 @@ fn main() -> anyhow::Result<()> {
             )?;
         }
         Command::Run => {
-            let stop = signals::stop_flag()?;
-            run::run(&cli.config, &cli.hwmon_root, &cli.state_dir, &stop)?;
+            let paths = run::Paths {
+                config: &cli.config,
+                hwmon_root: &cli.hwmon_root,
+                state_dir: &cli.state_dir,
+            };
+            let signals = signals::DaemonSignals::register()?;
+            let notifier = notify::Notifier::from_env()?;
+            run::run(&paths, &signals, &notifier)?;
         }
         Command::Restore => restore::run(&cli.config, &cli.hwmon_root, &mut std::io::stdout())?,
     }

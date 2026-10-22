@@ -461,3 +461,93 @@ fn restore_ignores_broken_sensors() {
         .success();
     assert_eq!(nct6798_attribute(&sysfs, "pwm2_enable"), "5");
 }
+
+/// A socket standing in for systemd's `NOTIFY_SOCKET`.
+struct FakeSystemd {
+    _dir: TempDir,
+    path: PathBuf,
+    socket: std::os::unix::net::UnixDatagram,
+}
+
+impl FakeSystemd {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notify");
+        let socket = std::os::unix::net::UnixDatagram::bind(&path).unwrap();
+        socket
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+        Self {
+            _dir: dir,
+            path,
+            socket,
+        }
+    }
+
+    /// Receives messages until one starts with `prefix`, and returns it.
+    fn wait_for(&self, prefix: &str) -> String {
+        let mut buffer = [0; 1024];
+        loop {
+            let length = self
+                .socket
+                .recv(&mut buffer)
+                .expect("a message from the daemon");
+            let message = String::from_utf8_lossy(&buffer[..length]).into_owned();
+            if message.starts_with(prefix) {
+                return message;
+            }
+        }
+    }
+}
+
+fn signal(child: &std::process::Child, name: &str) {
+    let sent = Command::new("kill")
+        .args([&format!("-{name}"), &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(sent.success());
+}
+
+#[test]
+fn run_talks_to_systemd_and_reloads_on_sighup() {
+    let sysfs = FakeSysfs::this_pc();
+    let config = sysfs.config(&example_config());
+    let state_dir = tempfile::tempdir_in("/dev/shm").unwrap();
+    let systemd = FakeSystemd::new();
+
+    let child = sysfs
+        .onlycurves(&[
+            "--config",
+            config.to_str().unwrap(),
+            "--state-dir",
+            state_dir.path().to_str().unwrap(),
+            "run",
+        ])
+        .env("NOTIFY_SOCKET", &systemd.path)
+        .env("WATCHDOG_USEC", "10000000")
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let ping = systemd.wait_for("WATCHDOG=1");
+    assert!(
+        ping.contains("STATUS=cpu_cooler 48 % (cpu 49.1 °C), exhaust 47 % (gpu 47.0 °C)"),
+        "{ping}"
+    );
+    systemd.wait_for("READY=1");
+
+    // A steeper CPU cooler curve: 49.125 °C on [[35, 50], [55, 80]] -> 71.2 % -> 182.
+    sysfs.config(&example_config().replace("[[35, 30], [55, 55]", "[[35, 50], [55, 80]"));
+    signal(&child, "HUP");
+    systemd.wait_for("RELOADING=1\nMONOTONIC_USEC=");
+    systemd.wait_for("READY=1");
+    wait_for(|| nct6798_attribute(&sysfs, "pwm2") == "182");
+
+    signal(&child, "TERM");
+    systemd.wait_for("STOPPING=1");
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(stderr.contains("reloaded"), "{stderr}");
+    assert_eq!(nct6798_attribute(&sysfs, "pwm2_enable"), "5");
+}

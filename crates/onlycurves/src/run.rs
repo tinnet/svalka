@@ -2,13 +2,16 @@
 //!
 //! Startup takes every configured fan output into manual mode. Each tick reads
 //! every sensor once, lets each fan's [`FanController`] pick a duty, writes it
-//! when it changed, and writes the state snapshot. On exit (SIGINT, SIGTERM,
-//! SIGHUP or an error) every output goes back to the chip's own automatic mode,
-//! so the BIOS curve runs the fans.
+//! when it changed, writes the state snapshot and pets systemd's watchdog.
+//! SIGHUP reloads the config. On exit (SIGINT, SIGTERM or an error) every
+//! output goes back to the chip's own automatic mode, so the BIOS curve runs
+//! the fans.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
+use std::mem;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -20,7 +23,9 @@ use onlycurves_core::state::{FanMode, FanSnapshot, Snapshot, VERSION};
 use crate::binding::{Bindings, BoundOutput};
 use crate::hwmon::{HandBack, ManualOverride, automatic_mode, is_held};
 use crate::log;
+use crate::notify::Notifier;
 use crate::setup::Setup;
+use crate::signals::DaemonSignals;
 use crate::statefile::StateFile;
 
 /// At or above this duty, a tachometer reading 0 rpm means a stalled fan.
@@ -30,45 +35,175 @@ const STALL_MIN_PERCENT: f64 = 30.0;
 /// rpm only every 1.5–2 s, and a fan needs a moment to spin up.
 const STALL_TICKS: u32 = 5;
 
-/// How often a sleeping loop checks for a stop signal.
-const STOP_CHECK: Duration = Duration::from_millis(100);
+/// How often a sleeping loop checks for signals.
+const SIGNAL_CHECK: Duration = Duration::from_millis(100);
 
-/// Runs the control loop until `stop` is set or an error occurs, then hands
-/// every output back to the chip.
+/// Where `run` finds its config and hardware and puts its state.
+pub struct Paths<'a> {
+    pub config: &'a Path,
+    pub hwmon_root: &'a Path,
+    pub state_dir: &'a Path,
+}
+
+/// Runs the control loop until a stop signal or an error, then hands every
+/// output back to the chip.
 ///
 /// # Errors
 ///
 /// Fails when the config does not load, the state directory is unusable, an
 /// output cannot be taken over, or writing a duty fails. Outputs already
 /// taken over are handed back first.
-pub fn run(
-    config_path: &Path,
-    hwmon_root: &Path,
-    state_dir: &Path,
-    stop: &AtomicBool,
-) -> anyhow::Result<()> {
-    let setup = Setup::load(config_path, hwmon_root)?;
-    let state_file = StateFile::prepare(state_dir)?;
-    let mut fans = take_over_fans(&setup)?;
-    log::info(format!(
-        "controlling {} every {:?}; state in {}",
-        fans.iter()
-            .map(|fan| fan.name.as_str())
-            .collect::<Vec<_>>()
-            .join(", "),
-        setup.config.interval,
-        state_file.path().display()
-    ));
+pub fn run(paths: &Paths, signals: &DaemonSignals, notifier: &Notifier) -> anyhow::Result<()> {
+    let setup = Setup::load(paths.config, paths.hwmon_root)?;
+    let state_file = StateFile::prepare(paths.state_dir)?;
+    let fans = take_over_fans(&setup)?;
+    let mut daemon = Daemon {
+        paths,
+        setup,
+        fans,
+        state_file,
+        notifier,
+        state_write_failed: false,
+    };
+    daemon.log_start();
 
-    let result = control_loop(&setup, &mut fans, &state_file, stop);
-    hand_back_all(fans);
-    if let Err(error) = state_file.remove() {
-        log::error(format!(
-            "cannot remove {}: {error}",
-            state_file.path().display()
+    let result = daemon.control_loop(signals);
+    notifier.stopping();
+    daemon.shut_down();
+    result
+}
+
+/// Everything the running loop owns.
+struct Daemon<'a> {
+    paths: &'a Paths<'a>,
+    setup: Setup,
+    fans: Vec<FanLoop>,
+    state_file: StateFile,
+    notifier: &'a Notifier,
+    state_write_failed: bool,
+}
+
+/// What ended a wait between ticks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Wake {
+    /// Time for the next tick.
+    Tick,
+    Stop,
+    Reload,
+}
+
+impl Daemon<'_> {
+    fn log_start(&self) {
+        log::info(format!(
+            "controlling {} every {:?}; state in {}",
+            fan_names(&self.fans),
+            self.setup.config.interval,
+            self.state_file.path().display()
         ));
     }
-    result
+
+    fn control_loop(&mut self, signals: &DaemonSignals) -> anyhow::Result<()> {
+        let mut next = Instant::now();
+        let mut ready = false;
+        loop {
+            let status = self.tick_and_publish()?;
+            if !ready {
+                self.notifier.ready(&status);
+                ready = true;
+            }
+
+            next += self.setup.config.interval;
+            match wait_until(next, signals) {
+                Wake::Tick => {}
+                Wake::Stop => {
+                    log::info("stopping");
+                    return Ok(());
+                }
+                Wake::Reload => {
+                    self.reload();
+                    next = Instant::now();
+                }
+            }
+            // After a long stall (e.g. a debugger), restart the schedule instead of
+            // running the missed ticks back to back.
+            if Instant::now() > next + self.setup.config.interval {
+                next = Instant::now();
+            }
+        }
+    }
+
+    /// One tick, then the state file and systemd's status. Returns the status line.
+    fn tick_and_publish(&mut self) -> anyhow::Result<String> {
+        let snapshot = tick(&self.setup.bindings, &mut self.fans)?;
+        write_state(&self.state_file, &snapshot, &mut self.state_write_failed);
+        let status = status_line(&snapshot);
+        self.notifier.tick(&status);
+        Ok(status)
+    }
+
+    /// Loads the config again and switches to it. On any problem the running
+    /// config stays, and the problem is logged.
+    fn reload(&mut self) {
+        self.notifier.reloading();
+        let outcome = Setup::load(self.paths.config, self.paths.hwmon_root)
+            .and_then(|setup| self.switch_to(setup));
+        match outcome {
+            Ok(()) => log::info(format!(
+                "reloaded {}; controlling {}",
+                self.paths.config.display(),
+                fan_names(&self.fans)
+            )),
+            Err(error) => log::error(format!(
+                "reload failed, keeping the running config: {error:#}"
+            )),
+        }
+        self.notifier.ready("reloaded");
+    }
+
+    /// Switches to `setup`. New outputs are taken over first, so if that fails
+    /// nothing has changed. Outputs in both configs stay in manual mode
+    /// throughout; outputs no longer configured are handed back.
+    fn switch_to(&mut self, setup: Setup) -> anyhow::Result<()> {
+        let mut taken = BTreeMap::new();
+        for (name, output) in &setup.bindings.outputs {
+            if !self.fans.iter().any(|fan| fan.output.same_output(output)) {
+                taken.insert(name.clone(), take_over(output)?);
+            }
+        }
+
+        let mut old = mem::take(&mut self.fans);
+        for (name, fan) in &setup.config.fans {
+            let output = setup.bindings.outputs[name].clone();
+            let controller = FanController::new(
+                fan.clone(),
+                setup.config.interval,
+                setup.config.failsafe_duty,
+            );
+            let fan_loop = if let Some(manual) = taken.remove(name) {
+                FanLoop::new(name, output, manual, controller)
+            } else {
+                let index = old
+                    .iter()
+                    .position(|kept| kept.output.same_output(&output))
+                    .expect("outputs not taken over above are in the running config");
+                old.swap_remove(index).renamed(name, output, controller)
+            };
+            self.fans.push(fan_loop);
+        }
+        hand_back_all(old);
+        self.setup = setup;
+        Ok(())
+    }
+
+    fn shut_down(self) {
+        hand_back_all(self.fans);
+        if let Err(error) = self.state_file.remove() {
+            log::error(format!(
+                "cannot remove {}: {error}",
+                self.state_file.path().display()
+            ));
+        }
+    }
 }
 
 /// One fan's runtime state.
@@ -90,25 +225,12 @@ fn take_over_fans(setup: &Setup) -> anyhow::Result<Vec<FanLoop>> {
         // `bind` succeeded, so every fan has an output.
         let output = setup.bindings.outputs[name].clone();
         let manual = take_over(&output)?;
-        log::info(format!(
-            "{name}: took over {} (was {}); it returns to the chip's own curve on exit",
-            output.describe(),
-            manual.saved()
-        ));
-        fans.push(FanLoop {
-            name: name.clone(),
-            controller: FanController::new(
-                fan.clone(),
-                setup.config.interval,
-                setup.config.failsafe_duty,
-            ),
-            output,
-            manual,
-            written: None,
-            in_failsafe: false,
-            interfered: false,
-            stalled_ticks: 0,
-        });
+        let controller = FanController::new(
+            fan.clone(),
+            setup.config.interval,
+            setup.config.failsafe_duty,
+        );
+        fans.push(FanLoop::new(name, output, manual, controller));
     }
     Ok(fans)
 }
@@ -122,42 +244,23 @@ fn take_over(output: &BoundOutput) -> anyhow::Result<ManualOverride> {
             output.describe()
         )
     })?;
-    ManualOverride::take(output.chip(), output.pwm(), HandBack::Automatic(mode)).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::PermissionDenied {
-            anyhow!(
-                "writing {} needs root; run this with sudo",
-                output.describe()
-            )
-        } else {
-            anyhow!(error).context(format!("cannot take over {}", output.describe()))
-        }
-    })
-}
-
-fn control_loop(
-    setup: &Setup,
-    fans: &mut [FanLoop],
-    state_file: &StateFile,
-    stop: &AtomicBool,
-) -> anyhow::Result<()> {
-    let interval = setup.config.interval;
-    let mut state_write_failed = false;
-    let mut next = Instant::now();
-    loop {
-        let snapshot = tick(&setup.bindings, fans)?;
-        write_state(state_file, &snapshot, &mut state_write_failed);
-
-        next += interval;
-        if !sleep_until(next, stop) {
-            log::info("stopping");
-            return Ok(());
-        }
-        // After a long stall (e.g. a debugger), restart the schedule instead of
-        // running the missed ticks back to back.
-        if Instant::now() > next + interval {
-            next = Instant::now();
-        }
-    }
+    let manual = ManualOverride::take(output.chip(), output.pwm(), HandBack::Automatic(mode))
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::PermissionDenied {
+                anyhow!(
+                    "writing {} needs root; run this with sudo",
+                    output.describe()
+                )
+            } else {
+                anyhow!(error).context(format!("cannot take over {}", output.describe()))
+            }
+        })?;
+    log::info(format!(
+        "took over {} (was {}); it returns to the chip's own curve on exit",
+        output.describe(),
+        manual.saved()
+    ));
+    Ok(manual)
 }
 
 /// One tick for every fan. Returns the snapshot to publish.
@@ -175,6 +278,33 @@ fn tick(bindings: &Bindings, fans: &mut [FanLoop]) -> anyhow::Result<Snapshot> {
     })
 }
 
+/// E.g. `cpu_cooler 48 % (cpu 49.1 °C), exhaust 100 % (failsafe)`, for
+/// `systemctl status`.
+fn status_line(snapshot: &Snapshot) -> String {
+    let mut line = String::new();
+    for (name, fan) in &snapshot.fans {
+        if !line.is_empty() {
+            line += ", ";
+        }
+        let _ = write!(line, "{name} {:.0} %", fan.duty);
+        match (fan.mode, &fan.source, fan.celsius) {
+            (FanMode::Failsafe, _, _) => line += " (failsafe)",
+            (FanMode::Normal, Some(source), Some(celsius)) => {
+                let _ = write!(line, " ({source} {celsius:.1} °C)");
+            }
+            (FanMode::Normal, _, _) => {}
+        }
+    }
+    line
+}
+
+fn fan_names(fans: &[FanLoop]) -> String {
+    fans.iter()
+        .map(|fan| fan.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Every sensor's temperature, or `None` when it cannot be read.
 fn read_sensors(bindings: &Bindings) -> BTreeMap<String, Option<f64>> {
     bindings
@@ -185,6 +315,36 @@ fn read_sensors(bindings: &Bindings) -> BTreeMap<String, Option<f64>> {
 }
 
 impl FanLoop {
+    fn new(
+        name: &str,
+        output: BoundOutput,
+        manual: ManualOverride,
+        controller: FanController,
+    ) -> Self {
+        Self {
+            name: name.to_owned(),
+            output,
+            manual,
+            controller,
+            written: None,
+            in_failsafe: false,
+            interfered: false,
+            stalled_ticks: 0,
+        }
+    }
+
+    /// The same output under a reloaded config: keeps the takeover and the duty
+    /// last written, takes the new name and controller.
+    fn renamed(self, name: &str, output: BoundOutput, controller: FanController) -> Self {
+        Self {
+            name: name.to_owned(),
+            output,
+            controller,
+            in_failsafe: false,
+            ..self
+        }
+    }
+
     fn tick(&mut self, sensors: &BTreeMap<String, Option<f64>>) -> anyhow::Result<FanSnapshot> {
         let tick = self.controller.tick(sensors);
         self.report_failsafe(&tick);
@@ -336,18 +496,21 @@ fn write_state(state_file: &StateFile, snapshot: &Snapshot, failed: &mut bool) {
     }
 }
 
-/// Sleeps until `deadline`, waking early when `stop` is set. Returns `false`
-/// when stopped.
-fn sleep_until(deadline: Instant, stop: &AtomicBool) -> bool {
+/// Sleeps until `deadline`, waking early for a stop or reload signal. A
+/// reload request is consumed.
+fn wait_until(deadline: Instant, signals: &DaemonSignals) -> Wake {
     loop {
-        if stop.load(Ordering::Relaxed) {
-            return false;
+        if signals.stop.load(Ordering::Relaxed) {
+            return Wake::Stop;
+        }
+        if signals.reload.swap(false, Ordering::Relaxed) {
+            return Wake::Reload;
         }
         let now = Instant::now();
         if now >= deadline {
-            return true;
+            return Wake::Tick;
         }
-        thread::sleep((deadline - now).min(STOP_CHECK));
+        thread::sleep((deadline - now).min(SIGNAL_CHECK));
     }
 }
 
@@ -397,6 +560,8 @@ curve   = [[40, 40], [60, 60]]
             .attr("temp1_label", "Tctl");
         sysfs
             .chip("hwmon7", "nct6798", "platform/nct6775.656")
+            .attr("pwm1", "74")
+            .attr("pwm1_enable", "5")
             .attr("pwm2", "98")
             .attr("pwm2_enable", "5")
             .attr("fan2_input", "1036");
@@ -475,10 +640,144 @@ curve   = [[40, 40], [60, 60]]
     }
 
     #[test]
-    fn sleep_until_returns_false_when_stopped() {
+    fn wait_until_wakes_for_signals_and_deadlines() {
         let far = Instant::now() + Duration::from_secs(60);
+        let signals = DaemonSignals::unregistered();
 
-        assert!(!sleep_until(far, &AtomicBool::new(true)));
-        assert!(sleep_until(Instant::now(), &AtomicBool::new(false)));
+        signals.reload.store(true, Ordering::Relaxed);
+        assert_eq!(wait_until(far, &signals), Wake::Reload);
+        assert!(
+            !signals.reload.load(Ordering::Relaxed),
+            "the request is consumed"
+        );
+
+        assert_eq!(wait_until(Instant::now(), &signals), Wake::Tick);
+
+        signals.stop.store(true, Ordering::Relaxed);
+        assert_eq!(wait_until(far, &signals), Wake::Stop);
+    }
+
+    /// Runs `test` on a daemon for the fake PC's `CONFIG`, after one tick.
+    fn with_daemon(test: impl FnOnce(&FakeSysfs, &mut Daemon)) {
+        let (sysfs, setup) = fake_pc();
+        let shm = tempfile::tempdir_in("/dev/shm").unwrap();
+        let config = sysfs.hwmon_root().join("../../onlycurves.toml");
+        let hwmon_root = sysfs.hwmon_root();
+        let paths = Paths {
+            config: &config,
+            hwmon_root: &hwmon_root,
+            state_dir: shm.path(),
+        };
+        let notifier = Notifier::disabled();
+        let mut daemon = Daemon {
+            paths: &paths,
+            fans: take_over_fans(&setup).unwrap(),
+            setup,
+            state_file: StateFile::prepare(shm.path()).unwrap(),
+            notifier: &notifier,
+            state_write_failed: false,
+        };
+        daemon.tick_and_publish().unwrap();
+        test(&sysfs, &mut daemon);
+    }
+
+    fn attribute(sysfs: &FakeSysfs, file: &str) -> String {
+        fs::read_to_string(sysfs.hwmon_root().join("hwmon7").join(file))
+            .unwrap()
+            .trim()
+            .to_owned()
+    }
+
+    fn rewrite_config(sysfs: &FakeSysfs, text: &str) {
+        fs::write(sysfs.hwmon_root().join("../../onlycurves.toml"), text).unwrap();
+    }
+
+    #[test]
+    fn reload_applies_a_new_curve_without_letting_go() {
+        with_daemon(|sysfs, daemon| {
+            rewrite_config(
+                sysfs,
+                &CONFIG.replace("[[40, 40], [60, 60]]", "[[40, 80], [60, 100]]"),
+            );
+
+            daemon.reload();
+            assert_eq!(
+                attribute(sysfs, "pwm2_enable"),
+                "1",
+                "still ours during the switch"
+            );
+            daemon.tick_and_publish().unwrap();
+
+            assert_eq!(
+                attribute(sysfs, "pwm2"),
+                pwm::percent_to_raw(90.0).to_string()
+            );
+        });
+    }
+
+    #[test]
+    fn reload_hands_back_removed_fans_and_takes_new_ones() {
+        with_daemon(|sysfs, daemon| {
+            rewrite_config(
+                sysfs,
+                &CONFIG
+                    .replace("[fan.cpu_cooler]", "[fan.exhaust]")
+                    .replace("pwm = 2", "pwm = 1"),
+            );
+
+            daemon.reload();
+
+            assert_eq!(fan_names(&daemon.fans), "exhaust");
+            assert_eq!(attribute(sysfs, "pwm2_enable"), "5");
+            assert_eq!(attribute(sysfs, "pwm1_enable"), "1");
+        });
+    }
+
+    #[test]
+    fn a_broken_config_keeps_the_running_one() {
+        with_daemon(|sysfs, daemon| {
+            rewrite_config(
+                sysfs,
+                &CONFIG.replace("[[40, 40], [60, 60]]", "[[60, 40], [40, 60]]"),
+            );
+
+            daemon.reload();
+
+            assert_eq!(fan_names(&daemon.fans), "cpu_cooler");
+            assert_eq!(attribute(sysfs, "pwm2_enable"), "1");
+        });
+    }
+
+    #[test]
+    fn status_line_names_each_fan_and_its_driver() {
+        let fan = |duty, mode, source: Option<&str>, celsius| FanSnapshot {
+            output: "nct6798 pwm2".into(),
+            mode,
+            source: source.map(str::to_owned),
+            celsius,
+            smoothed_celsius: None,
+            effective_celsius: None,
+            duty,
+            pwm_raw: 0,
+            pwm_enable: Some(1),
+            rpm: None,
+        };
+        let snapshot = Snapshot {
+            version: VERSION,
+            unix_millis: 0,
+            sensors: BTreeMap::new(),
+            fans: BTreeMap::from([
+                (
+                    "cpu_cooler".into(),
+                    fan(47.66, FanMode::Normal, Some("cpu"), Some(49.125)),
+                ),
+                ("exhaust".into(), fan(100.0, FanMode::Failsafe, None, None)),
+            ]),
+        };
+
+        assert_eq!(
+            status_line(&snapshot),
+            "cpu_cooler 48 % (cpu 49.1 °C), exhaust 100 % (failsafe)"
+        );
     }
 }

@@ -74,6 +74,12 @@ impl BoundOutput {
         self.chip.read_fan(self.pwm)
     }
 
+    /// Whether `other` is the same physical output.
+    #[must_use]
+    pub fn same_output(&self, other: &BoundOutput) -> bool {
+        self.chip.dir() == other.chip.dir() && self.pwm == other.pwm
+    }
+
     /// The chip the output belongs to.
     #[must_use]
     pub fn chip(&self) -> &Chip {
