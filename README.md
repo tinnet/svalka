@@ -68,13 +68,18 @@ $ sudo onlycurves --config examples/onlycurves.toml identify exhaust
 Running exhaust (nct6798 pwm1) at 100 % for 5 s. Watch or listen for the fan that speeds up.
 
             fan1    fan2    fan5
-before       770    1370       0 rpm
-1 s         1510    1370       0 rpm
-...
-Restored nct6798 pwm1 to 77/255, manual (1).
-fan1 rose from 770 to 1890 rpm: pwm1 drives the fan that fan1 reports.
+before       931    1044       0 rpm
+1 s          931    1044       0 rpm
+2 s         1293    1036       0 rpm
+3 s         1293    1036       0 rpm
+4 s         1764    1027       0 rpm
+5 s         1764    1027       0 rpm
+
+Restored nct6798 pwm1 to 98/255, automatic (5).
+fan1 rose from 931 to 1764 rpm: pwm1 drives the fan that fan1 reports.
 ```
 
+The nct6775 driver refreshes readings every 1.5–2 s, hence the pairs.
 Stop CoolerControl first (`sudo systemctl stop coolercontrold`): if another
 program writes the output during the test, `identify` stops and restores it.
 Ctrl-C and SIGTERM also restore before exiting.
