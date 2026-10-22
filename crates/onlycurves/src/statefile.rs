@@ -45,6 +45,12 @@ impl StateFile {
         }
     }
 
+    /// The state directory, on tmpfs.
+    #[must_use]
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     /// The path readers use.
     #[must_use]
     pub fn path(&self) -> PathBuf {

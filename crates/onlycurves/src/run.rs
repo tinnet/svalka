@@ -24,6 +24,7 @@ use crate::binding::{Bindings, BoundOutput};
 use crate::hwmon::{HandBack, ManualOverride, automatic_mode, is_held};
 use crate::log;
 use crate::notify::Notifier;
+use crate::record::{HeldOutput, OutputRecord};
 use crate::setup::Setup;
 use crate::signals::DaemonSignals;
 use crate::statefile::StateFile;
@@ -56,12 +57,19 @@ pub struct Paths<'a> {
 pub fn run(paths: &Paths, signals: &DaemonSignals, notifier: &Notifier) -> anyhow::Result<()> {
     let setup = Setup::load(paths.config, paths.hwmon_root)?;
     let state_file = StateFile::prepare(paths.state_dir)?;
+    // Recorded before the takeover, so `restore` finds every output even if
+    // we die halfway through it.
+    let record = OutputRecord::in_dir(state_file.dir());
+    record
+        .write(&held_outputs(setup.bindings.outputs.values())?)
+        .with_context(|| format!("cannot write {}", record.path().display()))?;
     let fans = take_over_fans(&setup)?;
     let mut daemon = Daemon {
         paths,
         setup,
         fans,
         state_file,
+        record,
         notifier,
         state_write_failed: false,
     };
@@ -79,6 +87,8 @@ struct Daemon<'a> {
     setup: Setup,
     fans: Vec<FanLoop>,
     state_file: StateFile,
+    /// The outputs we hold, for `restore`.
+    record: OutputRecord,
     notifier: &'a Notifier,
     state_write_failed: bool,
 }
@@ -164,6 +174,14 @@ impl Daemon<'_> {
     /// nothing has changed. Outputs in both configs stay in manual mode
     /// throughout; outputs no longer configured are handed back.
     fn switch_to(&mut self, setup: Setup) -> anyhow::Result<()> {
+        // While switching we may hold outputs of both configs.
+        let running = self.fans.iter().map(|fan| &fan.output);
+        self.record
+            .write(&held_outputs(
+                running.chain(setup.bindings.outputs.values()),
+            )?)
+            .with_context(|| format!("cannot write {}", self.record.path().display()))?;
+
         let mut taken = BTreeMap::new();
         for (name, output) in &setup.bindings.outputs {
             if !self.fans.iter().any(|fan| fan.output.same_output(output)) {
@@ -192,6 +210,15 @@ impl Daemon<'_> {
         }
         hand_back_all(old);
         self.setup = setup;
+        // Only the new outputs now. If this fails the record lists a few
+        // outputs too many, which `restore` handles fine.
+        let held = held_outputs(self.fans.iter().map(|fan| &fan.output))?;
+        if let Err(error) = self.record.write(&held) {
+            log::error(format!(
+                "cannot write {}: {error}",
+                self.record.path().display()
+            ));
+        }
         Ok(())
     }
 
@@ -201,6 +228,12 @@ impl Daemon<'_> {
             log::error(format!(
                 "cannot remove {}: {error}",
                 self.state_file.path().display()
+            ));
+        }
+        if let Err(error) = self.record.remove() {
+            log::error(format!(
+                "cannot remove {}: {error}",
+                self.record.path().display()
             ));
         }
     }
@@ -237,13 +270,7 @@ fn take_over_fans(setup: &Setup) -> anyhow::Result<Vec<FanLoop>> {
 
 /// Switches `output` to manual, to be handed back to the chip's automatic mode.
 fn take_over(output: &BoundOutput) -> anyhow::Result<ManualOverride> {
-    let mode = automatic_mode(output.chip()).ok_or_else(|| {
-        anyhow!(
-            "{}: onlycurves does not know this chip's automatic mode, so it could not \
-             hand the fan back on exit; only nct6775-family chips are supported",
-            output.describe()
-        )
-    })?;
+    let mode = firmware_mode(output)?;
     let manual = ManualOverride::take(output.chip(), output.pwm(), HandBack::Automatic(mode))
         .map_err(|error| {
             if error.kind() == std::io::ErrorKind::PermissionDenied {
@@ -261,6 +288,31 @@ fn take_over(output: &BoundOutput) -> anyhow::Result<ManualOverride> {
         manual.saved()
     ));
     Ok(manual)
+}
+
+/// The chip's automatic mode for `output`, which it is handed back to.
+fn firmware_mode(output: &BoundOutput) -> anyhow::Result<u8> {
+    automatic_mode(output.chip()).ok_or_else(|| {
+        anyhow!(
+            "{}: onlycurves does not know this chip's automatic mode, so it could not \
+             hand the fan back on exit; only nct6775-family chips are supported",
+            output.describe()
+        )
+    })
+}
+
+/// `outputs` as record entries, each physical output once.
+fn held_outputs<'a>(
+    outputs: impl Iterator<Item = &'a BoundOutput>,
+) -> anyhow::Result<Vec<HeldOutput>> {
+    let mut held: Vec<HeldOutput> = Vec::new();
+    for output in outputs {
+        let entry = HeldOutput::of(output, firmware_mode(output)?);
+        if !held.iter().any(|known| known.same_output(&entry)) {
+            held.push(entry);
+        }
+    }
+    Ok(held)
 }
 
 /// One tick for every fan. Returns the snapshot to publish.
@@ -674,6 +726,7 @@ curve   = [[40, 40], [60, 60]]
             fans: take_over_fans(&setup).unwrap(),
             setup,
             state_file: StateFile::prepare(shm.path()).unwrap(),
+            record: OutputRecord::in_dir(shm.path()),
             notifier: &notifier,
             state_write_failed: false,
         };

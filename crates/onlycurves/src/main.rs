@@ -97,7 +97,14 @@ fn main() -> anyhow::Result<()> {
             let notifier = notify::Notifier::from_env()?;
             run::run(&paths, &signals, &notifier)?;
         }
-        Command::Restore => restore::run(&cli.config, &cli.hwmon_root, &mut std::io::stdout())?,
+        Command::Restore => {
+            restore::run(
+                &cli.config,
+                &cli.hwmon_root,
+                &cli.state_dir,
+                &mut std::io::stdout(),
+            )?;
+        }
     }
     Ok(())
 }

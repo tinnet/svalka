@@ -106,9 +106,12 @@ it (`smoothing`), holds small drops (`hysteresis`), applies the curve and
 
 ### `sudo onlycurves restore`
 
-Hands every configured output back to the chip's own curve. systemd runs it
-after `run` exits for any reason, including `kill -9`. It only needs the
-config's outputs, so a broken sensor cannot block it.
+Hands fan outputs back to the chip's own curve. systemd runs it after `run`
+exits for any reason, including `kill -9`. It hands back every output that
+`run` recorded as held in `/run/onlycurves/outputs`, plus every output in the
+config. The record is what counts: the config on disk may have been edited or
+broken since `run` read it, so it is only required when there is no record.
+Sensors are never checked, so a broken sensor cannot block it.
 
 ### As a systemd service
 
@@ -164,6 +167,7 @@ crates/onlycurves/          the daemon and CLI (library + thin main.rs)
   src/identify.rs           the `identify` command
   src/run.rs                the `run` command: the control loop
   src/restore.rs            the `restore` command
+  src/record.rs             /run/onlycurves/outputs: what run holds, for restore
   src/statefile.rs          state.json, tmpfs only, atomic writes
   src/log.rs                stderr logging, journald priorities under systemd
   src/notify.rs             sd_notify: READY, STATUS, WATCHDOG, RELOADING

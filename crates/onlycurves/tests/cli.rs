@@ -387,6 +387,8 @@ fn run_drives_the_fans_and_hands_them_back_on_sigterm() {
     assert_eq!(cooler.source.as_deref(), Some("cpu"));
     assert_eq!(cooler.pwm_raw, 122);
     assert_eq!(snapshot.fans["exhaust"].rpm, Some(971));
+    let record = fs::read_to_string(state_dir.path().join("outputs")).unwrap();
+    assert_eq!(record.lines().count(), 2, "{record}");
 
     let terminated = Command::new("kill")
         .args(["-TERM", &child.id().to_string()])
@@ -407,6 +409,7 @@ fn run_drives_the_fans_and_hands_them_back_on_sigterm() {
         !state_file.exists(),
         "a stopped daemon leaves no state behind"
     );
+    assert!(!state_dir.path().join("outputs").exists());
 }
 
 #[test]
@@ -431,19 +434,26 @@ fn run_refuses_a_state_directory_on_disk_before_touching_fans() {
 }
 
 #[test]
-fn restore_hands_every_fan_back_to_the_chip() {
+fn restore_hands_every_configured_fan_back_to_the_chip() {
     let sysfs = FakeSysfs::this_pc();
     let config = sysfs.config(&example_config());
+    let state_dir = tempfile::tempdir().unwrap();
 
     sysfs
-        .onlycurves(&["--config", config.to_str().unwrap(), "restore"])
+        .onlycurves(&[
+            "--config",
+            config.to_str().unwrap(),
+            "--state-dir",
+            state_dir.path().to_str().unwrap(),
+            "restore",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::contains(
-            "cpu_cooler: nct6798 pwm2 handed back to the chip (mode 5)",
+            "nct6798 pwm2 handed back to the chip (mode 5)",
         ))
         .stdout(predicate::str::contains(
-            "exhaust: nct6798 pwm1 handed back to the chip (mode 5)",
+            "nct6798 pwm1 handed back to the chip (mode 5)",
         ));
     assert_eq!(nct6798_attribute(&sysfs, "pwm1_enable"), "5");
     assert_eq!(nct6798_attribute(&sysfs, "pwm2_enable"), "5");
@@ -454,12 +464,74 @@ fn restore_ignores_broken_sensors() {
     let sysfs = FakeSysfs::this_pc();
     let text = example_config().replace(r#"label = "Tctl""#, r#"label = "Tcl""#);
     let config = sysfs.config(&text);
+    let state_dir = tempfile::tempdir().unwrap();
 
     sysfs
-        .onlycurves(&["--config", config.to_str().unwrap(), "restore"])
+        .onlycurves(&[
+            "--config",
+            config.to_str().unwrap(),
+            "--state-dir",
+            state_dir.path().to_str().unwrap(),
+            "restore",
+        ])
         .assert()
         .success();
     assert_eq!(nct6798_attribute(&sysfs, "pwm2_enable"), "5");
+}
+
+#[test]
+fn restore_uses_the_record_when_the_config_is_broken() {
+    let sysfs = FakeSysfs::this_pc();
+    let config = sysfs.config("this is not toml");
+    let state_dir = tempfile::tempdir().unwrap();
+    let chip_dir = sysfs.hwmon_root().join("hwmon7");
+    fs::write(
+        state_dir.path().join("outputs"),
+        format!("5 2 {}\n", chip_dir.display()),
+    )
+    .unwrap();
+
+    sysfs
+        .onlycurves(&[
+            "--config",
+            config.to_str().unwrap(),
+            "--state-dir",
+            state_dir.path().to_str().unwrap(),
+            "restore",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "using only the record; the config does not load",
+        ))
+        .stdout(predicate::str::contains(
+            "nct6798 pwm2 handed back to the chip (mode 5)",
+        ));
+    assert_eq!(nct6798_attribute(&sysfs, "pwm2_enable"), "5");
+    assert_eq!(
+        nct6798_attribute(&sysfs, "pwm1_enable"),
+        "1",
+        "not recorded, not configured"
+    );
+    assert!(!state_dir.path().join("outputs").exists());
+}
+
+#[test]
+fn restore_fails_without_record_or_config() {
+    let sysfs = FakeSysfs::this_pc();
+    let config = sysfs.config("this is not toml");
+    let state_dir = tempfile::tempdir().unwrap();
+
+    sysfs
+        .onlycurves(&[
+            "--config",
+            config.to_str().unwrap(),
+            "--state-dir",
+            state_dir.path().to_str().unwrap(),
+            "restore",
+        ])
+        .assert()
+        .failure();
 }
 
 /// A socket standing in for systemd's `NOTIFY_SOCKET`.

@@ -9,6 +9,7 @@ pub mod hwmon;
 pub mod identify;
 pub mod log;
 pub mod notify;
+pub mod record;
 pub mod restore;
 pub mod run;
 pub mod setup;
