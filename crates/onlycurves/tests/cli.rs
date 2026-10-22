@@ -11,6 +11,7 @@ use tempfile::TempDir;
 
 /// A small copy of this PC's hwmon layout, with two NVMe drives added so that
 /// one name is shared. `class/hwmon` holds the chips, `devices` their devices.
+/// It has everything `examples/onlycurves.toml` refers to.
 struct FakeSysfs {
     root: TempDir,
 }
@@ -30,7 +31,15 @@ impl FakeSysfs {
                 ("fan1_input", "971"),
                 ("pwm1", "102"),
                 ("pwm1_enable", "1"),
+                ("pwm2", "120"),
+                ("pwm2_enable", "1"),
             ],
+        );
+        sysfs.chip(
+            "hwmon1",
+            "amdgpu",
+            "pci0000:00/0000:0a:00.0",
+            &[("temp2_input", "47000"), ("temp2_label", "junction")],
         );
         sysfs.chip(
             "hwmon3",
@@ -66,6 +75,13 @@ impl FakeSysfs {
         }
     }
 
+    /// Writes a config file next to the fake tree and returns its path.
+    fn config(&self, text: &str) -> PathBuf {
+        let path = self.root.path().join("onlycurves.toml");
+        fs::write(&path, text).unwrap();
+        path
+    }
+
     fn hwmon_root(&self) -> PathBuf {
         self.root.path().join("class/hwmon")
     }
@@ -79,6 +95,12 @@ impl FakeSysfs {
             .args(args);
         command
     }
+}
+
+/// The example config shipped in the repository.
+fn example_config() -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/onlycurves.toml");
+    fs::read_to_string(path).unwrap()
 }
 
 fn write_attribute(dir: &Path, file: &str, value: &str) {
@@ -180,5 +202,73 @@ fn status_reports_a_missing_hwmon_root() {
         .failure()
         .stderr(predicate::str::contains(
             "cannot list hwmon chips in /nonexistent/hwmon",
+        ));
+}
+
+#[test]
+fn check_accepts_the_example_config_and_shows_duties() {
+    let sysfs = FakeSysfs::this_pc();
+    let config = sysfs.config(&example_config());
+
+    sysfs
+        .onlycurves(&["--config", config.to_str().unwrap(), "check"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("onlycurves.toml is valid."))
+        .stdout(predicate::str::contains("cpu  k10temp Tctl      49.1 °C"))
+        .stdout(predicate::str::contains(
+            "cpu_cooler  nct6798 pwm2  cpu   49.1 °C  →   48 %  122/255  now  47 %  120/255",
+        ))
+        .stdout(predicate::str::contains(
+            "exhaust     nct6798 pwm1  gpu   47.0 °C  →   47 %  120/255  now  40 %  102/255",
+        ));
+}
+
+#[test]
+fn check_lists_every_hardware_problem() {
+    let sysfs = FakeSysfs::this_pc();
+    let text = example_config()
+        .replace(r#"label = "junction""#, r#"label = "hotspot""#)
+        .replace("pwm = 1 }", "pwm = 4 }");
+    let config = sysfs.config(&text);
+
+    sysfs
+        .onlycurves(&["--config", config.to_str().unwrap(), "check"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("2 problem(s):"))
+        .stderr(predicate::str::contains(
+            r#"sensors.gpu: amdgpu has no temperature labelled "hotspot"; it has: junction"#,
+        ))
+        .stderr(predicate::str::contains(
+            "fan.exhaust: output: nct6798 has no pwm4; it has: pwm1, pwm2",
+        ));
+}
+
+#[test]
+fn check_reports_config_errors_before_touching_hardware() {
+    let sysfs = FakeSysfs::this_pc();
+    let text = example_config().replace("[[35, 30], [55, 55]", "[[55, 30], [35, 55]");
+    let config = sysfs.config(&text);
+
+    sysfs
+        .onlycurves(&["--config", config.to_str().unwrap(), "check"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "fan.cpu_cooler: curve: point 2 (35 °C) must be hotter than point 1 (55 °C)",
+        ));
+}
+
+#[test]
+fn check_reports_a_missing_config() {
+    let sysfs = FakeSysfs::this_pc();
+
+    sysfs
+        .onlycurves(&["--config", "/nonexistent/onlycurves.toml", "check"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "cannot read /nonexistent/onlycurves.toml",
         ));
 }

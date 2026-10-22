@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand};
-use onlycurves::status;
+use onlycurves::{check, status};
 use shadow_rs::shadow;
 
 shadow!(build);
@@ -15,6 +15,10 @@ struct Cli {
     #[arg(long, global = true, hide = true, default_value = "/sys/class/hwmon")]
     hwmon_root: PathBuf,
 
+    /// Config file
+    #[arg(long, global = true, default_value = "/etc/onlycurves.toml")]
+    config: PathBuf,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -23,6 +27,8 @@ struct Cli {
 enum Command {
     /// Print every temperature, fan speed and PWM duty (read-only)
     Status(StatusArgs),
+    /// Validate the config against this PC and show each fan's duty right now (read-only)
+    Check,
 }
 
 #[derive(Args)]
@@ -46,6 +52,7 @@ fn main() -> anyhow::Result<()> {
             };
             print!("{}", status::run(&cli.hwmon_root, &filter)?);
         }
+        Command::Check => print!("{}", check::run(&cli.config, &cli.hwmon_root)?),
     }
     Ok(())
 }

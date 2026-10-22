@@ -31,6 +31,10 @@ description = "Build release binary"
 run = "cargo run --quiet -- status"
 description = "Show every temperature, fan and PWM"
 
+[tasks.check]
+run = "cargo run --quiet -- --config examples/onlycurves.toml check"
+description = "Check the example config against this PC"
+
 [tasks.scan-secrets]
 run = "betterleaks git --pre-commit --staged"
 description = "Scan for secrets in staged changes (pre-commit)"

@@ -4,6 +4,7 @@
 //! lives in these modules.
 
 pub mod binding;
+pub mod check;
 pub mod hwmon;
 pub mod status;
 mod sysfs;

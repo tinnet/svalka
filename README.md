@@ -7,7 +7,12 @@ curves, write fan PWM. Replaces CoolerControl on an ASUS B550-I / Ryzen 7
 
 ## Status
 
-Milestone 1 of 6: `onlycurves status`, read-only.
+Milestones 1 and 2 of 6 are done: `status` and `check`. Both are read-only
+and need no root.
+
+### `onlycurves status`
+
+Every temperature, fan speed and PWM output, by chip.
 
 ```console
 $ onlycurves status --chip nct6798
@@ -26,7 +31,30 @@ nct6798 · nct6775.656 · now hwmon7
 - `--chip NAME` shows one chip; add `--path DEVICE` when several chips share a
   name (e.g. two NVMe drives). The path matches the end of the device path, so
   `nct6775.656` and `platform/nct6775.656` both work.
-- Nothing is written. No root needed.
+
+### `onlycurves check`
+
+Validates the config (default `/etc/onlycurves.toml`, or `--config FILE`)
+against this PC and shows the duty each fan would get right now.
+
+```console
+$ onlycurves --config examples/onlycurves.toml check
+examples/onlycurves.toml is valid.
+
+Sensors
+  cpu  k10temp Tctl      44.6 °C
+  gpu  amdgpu junction   34.0 °C
+
+Fans, at the current temperatures (no smoothing or hysteresis)
+  cpu_cooler  nct6798 pwm2  cpu   44.6 °C  →   42 %  107/255  now  42 %  107/255
+  exhaust     nct6798 pwm1  gpu   34.0 °C  →   33 %   85/255  now  29 %   74/255
+```
+
+`now` is what the output is at today, i.e. what CoolerControl set. When the
+config is wrong, `check` lists every problem and exits 1. The config is
+checked first, then the hardware: chips must resolve, labels and outputs must
+exist, `AUXTIN*` inputs are refused, and every sensor must read 0–125 °C.
+[`examples/onlycurves.toml`](examples/onlycurves.toml) documents the format.
 
 ## Developing
 
@@ -39,22 +67,30 @@ Toolchain and tasks come from [mise](https://mise.jdx.dev/):
 | `mise run lint` | `clippy` (pedantic, warnings are errors) + `rustfmt --check` |
 | `mise run fmt` | Format |
 | `mise run status` | `cargo run -- status` |
+| `mise run check` | `check` with `examples/onlycurves.toml` |
 
 ## Layout
 
 ```text
+crates/onlycurves-core/     no hardware access; shared with the later TUI
+  src/curve.rs              piecewise-linear curves and their rules
+  src/config.rs             parsing and validating the TOML config
+  src/duration.rs           "8s" / "500ms" values
+  src/pwm.rs                percent <-> raw 0-255
 crates/onlycurves/          the daemon and CLI (library + thin main.rs)
   src/main.rs               command line only
   src/hwmon.rs              chip discovery and identity (name + device path)
   src/hwmon/sensors.rs      reading temperatures, fans, PWM
   src/hwmon/resolve.rs      picking one chip by name and path
-  src/status.rs             the `status` command and its table
+  src/binding.rs            tying config sensors and fans to real inputs/outputs
+  src/status.rs             the `status` command
+  src/check.rs              the `check` command
   src/sysfs.rs              reading one-value sysfs files
   tests/cli.rs              runs the binary against a fake sysfs tree
+examples/onlycurves.toml    the config for this PC
 ```
 
-`onlycurves-core` (config, curves, state snapshot) and `onlycurves-tui` join
-the workspace in later milestones.
+`onlycurves-tui` joins the workspace later.
 
 ## License
 

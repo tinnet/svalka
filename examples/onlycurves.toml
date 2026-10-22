@@ -1,0 +1,28 @@
+# onlycurves config for this PC (ASUS B550-I, Ryzen 7 5700X3D, RX 9070 XT).
+# Installed as /etc/onlycurves.toml. Check it with: onlycurves --config <file> check
+
+interval = "1s"           # control loop period
+failsafe_duty = 100       # % used when any input sensor fails to read
+
+# Temperature inputs, named once. `chip` is the hwmon driver name; add
+# `path = "..."` (the end of the device path) if two chips share a name.
+# `label` is the input's label as `onlycurves status` shows it.
+[sensors]
+cpu = { chip = "k10temp", label = "Tctl" }
+gpu = { chip = "amdgpu",  label = "junction" }   # read-only; the GPU fan stays on firmware
+
+# The two curves copy today's CoolerControl profiles.
+[fan.cpu_cooler]
+output     = { chip = "nct6798", pwm = 2 }
+sources    = ["cpu"]           # several sources: the hottest one wins
+curve      = [[35, 30], [55, 55], [75, 90], [85, 100]]   # [°C, %]
+smoothing  = "8s"              # EMA window on the input temperature
+hysteresis = 2.0               # °C the temperature must fall before duty drops
+min_duty   = 20                # % floor: this fan never stops
+
+[fan.exhaust]
+output     = { chip = "nct6798", pwm = 1 }
+sources    = ["gpu"]
+curve      = [[26, 25], [50, 50], [75, 75], [100, 100]]
+smoothing  = "8s"
+hysteresis = 2.0
