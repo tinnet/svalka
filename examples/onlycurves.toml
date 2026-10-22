@@ -16,7 +16,8 @@ failsafe_duty = 100       # % used when any input sensor fails to read
 cpu = { chip = "k10temp", label = "Tctl" }
 gpu = { chip = "amdgpu",  label = "junction" }   # read-only; the GPU fan stays on firmware
 
-# The two curves copy today's CoolerControl profiles.
+# The CPU cooler curve came from CoolerControl; the exhaust curve was tuned on
+# 2026-10-21 after watching WoW: GPU junction 62–72 °C, CPU ~46 °C.
 [fan.cpu_cooler]
 output     = { chip = "nct6798", pwm = 2 }
 sources    = ["cpu"]           # several sources: the hottest one wins
@@ -28,6 +29,8 @@ min_duty   = 20                # % floor: this fan never stops
 [fan.exhaust]
 output     = { chip = "nct6798", pwm = 1 }
 sources    = ["gpu"]
-curve      = [[26, 25], [50, 50], [75, 75], [100, 100]]
+# Gentle while the GPU runs cool (~40–50 % at 65–70 °C, it was ~65 %), still
+# full speed by 90 °C junction.
+curve      = [[40, 30], [60, 40], [75, 60], [90, 100]]
 smoothing  = "8s"
 hysteresis = 2.0

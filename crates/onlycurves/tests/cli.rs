@@ -249,7 +249,7 @@ fn check_accepts_the_example_config_and_shows_duties() {
             "cpu_cooler  nct6798 pwm2  cpu   49.1 °C  →   48 %  122/255  now  47 %  120/255",
         ))
         .stdout(predicate::str::contains(
-            "exhaust     nct6798 pwm1  gpu   47.0 °C  →   47 %  120/255  now  40 %  102/255",
+            "exhaust     nct6798 pwm1  gpu   47.0 °C  →   34 %   85/255  now  40 %  102/255",
         ));
 }
 
@@ -398,9 +398,9 @@ fn run_drives_the_fans_and_hands_them_back_on_sigterm() {
         .unwrap();
     wait_for(|| state_file.exists());
 
-    // cpu 49.125 °C on [[35, 30], [55, 55]] -> 47.7 % -> 122; gpu 47 °C -> 46.9 % -> 120.
+    // cpu 49.125 °C on [[35, 30], [55, 55]] -> 47.7 % -> 122; gpu 47 °C on [[40, 30], [60, 40]] -> 33.5 % -> 85.
     assert_eq!(nct6798_attribute(&sysfs, "pwm2"), "122");
-    assert_eq!(nct6798_attribute(&sysfs, "pwm1"), "120");
+    assert_eq!(nct6798_attribute(&sysfs, "pwm1"), "85");
     assert_eq!(nct6798_attribute(&sysfs, "pwm1_enable"), "1");
     let snapshot =
         onlycurves_core::state::Snapshot::from_json(&fs::read_to_string(&state_file).unwrap())
@@ -588,7 +588,7 @@ fn run_talks_to_systemd_and_reloads_on_sighup() {
     let status = systemd.wait_for("STATUS=");
     assert_eq!(
         status,
-        "STATUS=cpu_cooler 48 % (cpu 49 °C), exhaust 47 % (gpu 47 °C)"
+        "STATUS=cpu_cooler 48 % (cpu 49 °C), exhaust 34 % (gpu 47 °C)"
     );
     systemd.wait_for("READY=1");
 
