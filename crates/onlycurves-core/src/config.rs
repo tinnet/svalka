@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::curve::{Curve, Point};
+use crate::curve::{Curve, is_percent};
 use crate::duration;
 
 /// A validated config.
@@ -233,14 +233,9 @@ impl FanFile {
                 self.min_duty
             ));
         }
-        let curve = Curve::new(
-            self.curve
-                .into_iter()
-                .map(|(celsius, duty)| Point { celsius, duty })
-                .collect(),
-        )
-        .map_err(|error| problems.push(format!("curve: {error}")))
-        .ok()?;
+        let curve = Curve::from_pairs(self.curve)
+            .map_err(|error| problems.push(format!("curve: {error}")))
+            .ok()?;
 
         problems.is_empty().then_some(Fan {
             output: self.output,
@@ -266,10 +261,6 @@ fn check_sources(
             problems.push(format!("source {source:?} is not defined in [sensors]"));
         }
     }
-}
-
-fn is_percent(value: f64) -> bool {
-    (0.0..=100.0).contains(&value)
 }
 
 #[cfg(test)]

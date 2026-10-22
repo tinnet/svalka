@@ -104,6 +104,20 @@ impl Curve {
         Ok(Self { points })
     }
 
+    /// Builds a curve from `(°C, %)` pairs, as the config writes them.
+    ///
+    /// # Errors
+    ///
+    /// Returns the first rule the points break.
+    pub fn from_pairs(pairs: impl IntoIterator<Item = (f64, f64)>) -> Result<Self, CurveError> {
+        Self::new(
+            pairs
+                .into_iter()
+                .map(|(celsius, duty)| Point { celsius, duty })
+                .collect(),
+        )
+    }
+
     #[must_use]
     pub fn points(&self) -> &[Point] {
         &self.points
@@ -130,13 +144,18 @@ fn check_point(index: usize, point: &Point) -> Result<(), CurveError> {
     if !point.celsius.is_finite() || !point.duty.is_finite() {
         return Err(CurveError::NotFinite { index });
     }
-    if !(0.0..=100.0).contains(&point.duty) {
+    if !is_percent(point.duty) {
         return Err(CurveError::DutyOutOfRange {
             index,
             duty: point.duty,
         });
     }
     Ok(())
+}
+
+/// Whether `value` is a duty in percent, 0–100.
+pub(crate) fn is_percent(value: f64) -> bool {
+    (0.0..=100.0).contains(&value)
 }
 
 /// Checks that `point` (at `index`) comes after `previous` in a valid curve.
@@ -169,12 +188,7 @@ mod tests {
     use super::*;
 
     fn curve(points: &[(f64, f64)]) -> Result<Curve, CurveError> {
-        Curve::new(
-            points
-                .iter()
-                .map(|&(celsius, duty)| Point { celsius, duty })
-                .collect(),
-        )
+        Curve::from_pairs(points.iter().copied())
     }
 
     /// The CPU cooler curve from the design doc.

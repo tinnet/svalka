@@ -85,26 +85,13 @@ impl FanController {
         }
     }
 
-    /// The fan's source names, in config order.
-    #[must_use]
-    pub fn sources(&self) -> &[String] {
-        &self.fan.sources
-    }
-
     /// Runs one tick on this tick's readings, keyed by sensor name. A missing
     /// key or `None` means the sensor could not be read.
     pub fn tick(&mut self, readings: &BTreeMap<String, Option<f64>>) -> Tick {
-        let readings = match self.check_sources(readings) {
-            Ok(readings) => readings,
+        let (source, celsius) = match self.check_sources(readings) {
+            Ok(hottest) => hottest,
             Err(failsafe) => return self.failsafe_tick(failsafe),
         };
-        let readings = readings
-            .iter()
-            .map(|(source, celsius)| (source.as_str(), *celsius));
-        let Some((source, celsius)) = hottest(readings) else {
-            return self.failsafe_tick(Failsafe::NoSources);
-        };
-        let source = source.to_owned();
         let smoothed = self.smooth(celsius);
         let effective = self.apply_hysteresis(smoothed);
         Tick {
@@ -116,15 +103,15 @@ impl FanController {
         }
     }
 
-    /// This fan's readings, or why they cannot be trusted. Records every
-    /// readable value as the next tick's "previous", even on failure, so one
-    /// real jump causes one failsafe tick rather than many. An unreadable
-    /// source has no "previous".
+    /// The hottest of this fan's readings, or why they cannot be trusted.
+    /// Records every readable value as the next tick's "previous", even on
+    /// failure, so one real jump causes one failsafe tick rather than many. An
+    /// unreadable source has no "previous".
     fn check_sources(
         &mut self,
         readings: &BTreeMap<String, Option<f64>>,
-    ) -> Result<Vec<(String, f64)>, Failsafe> {
-        let mut checked = Vec::new();
+    ) -> Result<(String, f64), Failsafe> {
+        let mut hottest: Option<(&String, f64)> = None;
         let mut problem = None;
         for source in &self.fan.sources {
             let Some(celsius) = readings.get(source).copied().flatten() else {
@@ -136,19 +123,29 @@ impl FanController {
                 self.previous.remove(source);
                 continue;
             };
-            if let Some(&from) = self.previous.get(source)
-                && (celsius - from).abs() > MAX_JUMP_CELSIUS
-            {
-                problem.get_or_insert(Failsafe::Jump {
-                    source: source.clone(),
-                    from,
-                    to: celsius,
-                });
+            match self.previous.get_mut(source) {
+                Some(previous) => {
+                    if (celsius - *previous).abs() > MAX_JUMP_CELSIUS {
+                        problem.get_or_insert(Failsafe::Jump {
+                            source: source.clone(),
+                            from: *previous,
+                            to: celsius,
+                        });
+                    }
+                    *previous = celsius;
+                }
+                None => _ = self.previous.insert(source.clone(), celsius),
             }
-            self.previous.insert(source.clone(), celsius);
-            checked.push((source.clone(), celsius));
+            if hottest.is_none_or(|(_, warmest)| celsius > warmest) {
+                hottest = Some((source, celsius));
+            }
         }
-        problem.map_or(Ok(checked), Err)
+        if let Some(problem) = problem {
+            return Err(problem);
+        }
+        hottest
+            .map(|(source, celsius)| (source.clone(), celsius))
+            .ok_or(Failsafe::NoSources)
     }
 
     fn failsafe_tick(&self, failsafe: Failsafe) -> Tick {
