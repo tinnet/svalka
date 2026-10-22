@@ -140,10 +140,20 @@ pub fn bind_outputs(
     chips: &[Chip],
 ) -> Result<BTreeMap<String, BoundOutput>, Vec<String>> {
     let mut problems = Vec::new();
-    let mut outputs = BTreeMap::new();
+    let mut outputs: BTreeMap<String, BoundOutput> = BTreeMap::new();
     for (name, fan) in &config.fans {
         match bind_output(&fan.output, chips) {
-            Ok(bound) => _ = outputs.insert(name.clone(), bound),
+            Ok(bound) => {
+                if let Some((other, _)) =
+                    outputs.iter().find(|(_, taken)| taken.same_output(&bound))
+                {
+                    problems.push(format!(
+                        "fan.{other} and fan.{name} both drive {}",
+                        bound.describe()
+                    ));
+                }
+                outputs.insert(name.clone(), bound);
+            }
             Err(problem) => problems.push(format!("fan.{name}: output: {problem}")),
         }
     }
@@ -305,6 +315,24 @@ gpu = { chip = "radeon", label = "junction" }
                 r#"sensors.gpu: no hwmon chip named "radeon""#,
                 "fan.cpu_cooler: output: nct6798 has no pwm9; it has: pwm1, pwm2",
             ]
+        );
+    }
+
+    #[test]
+    fn two_spellings_of_one_output_are_one_output() {
+        let sysfs = this_pc();
+        let second_fan = CPU_FAN.replace("[fan.cpu_cooler]", "[fan.copy]").replace(
+            r#"chip = "nct6798", pwm = 2"#,
+            r#"chip = "nct6798", path = "nct6775.656", pwm = 2"#,
+        );
+        let config = config(
+            r#"cpu = { chip = "k10temp", label = "Tctl" }"#,
+            &format!("{CPU_FAN}\n{second_fan}"),
+        );
+
+        assert_eq!(
+            bind_problems(&config, &sysfs),
+            ["fan.copy and fan.cpu_cooler both drive nct6798 pwm2"]
         );
     }
 
