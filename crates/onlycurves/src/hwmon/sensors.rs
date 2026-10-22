@@ -127,10 +127,8 @@ impl Chip {
             .attribute_indices("temp", "_input")?
             .into_iter()
             .map(|n| Temp {
-                label: self.label_or(&format!("temp{n}_label"), &format!("temp{n}")),
-                celsius: self
-                    .read_attr::<i64>(&format!("temp{n}_input"))
-                    .map(millidegrees_to_celsius),
+                label: self.temp_label(n),
+                celsius: self.read_temp(n).ok(),
             })
             .collect();
         Ok(temps)
@@ -171,6 +169,60 @@ impl Chip {
             })
             .collect();
         Ok(pwms)
+    }
+
+    /// The labels of all temperature inputs, in index order.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the chip's directory cannot be listed.
+    pub fn temp_labels(&self) -> io::Result<Vec<String>> {
+        let indices = self.attribute_indices("temp", "_input")?;
+        Ok(indices.into_iter().map(|n| self.temp_label(n)).collect())
+    }
+
+    /// N of the temperature input `tempN` labelled `label`, if there is one.
+    /// Unlabelled inputs answer to `tempN`, as `status` shows them.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the chip's directory cannot be listed.
+    pub fn find_temp(&self, label: &str) -> io::Result<Option<u32>> {
+        let indices = self.attribute_indices("temp", "_input")?;
+        Ok(indices.into_iter().find(|&n| self.temp_label(n) == label))
+    }
+
+    /// Reads `tempN_input` in °C.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the input is missing, unreadable or not a number.
+    pub fn read_temp(&self, n: u32) -> io::Result<f64> {
+        let millidegrees: i64 = sysfs::read_value(&self.dir().join(format!("temp{n}_input")))?;
+        Ok(millidegrees_to_celsius(millidegrees))
+    }
+
+    /// The numbers N of all PWM outputs `pwmN`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the chip's directory cannot be listed.
+    pub fn pwm_numbers(&self) -> io::Result<Vec<u32>> {
+        self.attribute_indices("pwm", "")
+    }
+
+    /// Reads the raw duty (0–255) of `pwmN`.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the output is missing, unreadable or not a number.
+    pub fn read_pwm(&self, n: u32) -> io::Result<u8> {
+        sysfs::read_value(&self.dir().join(format!("pwm{n}")))
+    }
+
+    /// The label of `tempN`, or `tempN` itself when the chip has none.
+    fn temp_label(&self, n: u32) -> String {
+        self.label_or(&format!("temp{n}_label"), &format!("temp{n}"))
     }
 
     /// The sorted indices N of every attribute named `{prefix}N{suffix}`.
@@ -315,5 +367,27 @@ mod tests {
         assert_eq!(PwmEnable::from(1), PwmEnable::Manual);
         assert_eq!(PwmEnable::from(5), PwmEnable::Automatic(5));
         assert_eq!(PwmEnable::Automatic(5).to_string(), "automatic (5)");
+    }
+
+    #[test]
+    fn find_temp_matches_labels_and_fallback_names() {
+        let sysfs = FakeSysfs::new();
+        let chip = nct6798(&sysfs);
+
+        assert_eq!(chip.find_temp("SYSTIN").unwrap(), Some(1));
+        assert_eq!(chip.find_temp("temp2").unwrap(), Some(2));
+        assert_eq!(chip.find_temp("CPUTIN").unwrap(), None);
+        assert_eq!(chip.temp_labels().unwrap(), ["SYSTIN", "temp2"]);
+    }
+
+    #[test]
+    fn single_reads_return_values_or_errors() {
+        let sysfs = FakeSysfs::new();
+        let chip = nct6798(&sysfs);
+
+        assert!((chip.read_temp(2).unwrap() - 49.125).abs() < 1e-9);
+        assert!(chip.read_temp(9).is_err());
+        assert_eq!(chip.read_pwm(1).unwrap(), 102);
+        assert_eq!(chip.pwm_numbers().unwrap(), [1, 5]);
     }
 }

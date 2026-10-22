@@ -3,6 +3,7 @@
 //! The binary in `main.rs` only parses the command line; everything it runs
 //! lives in these modules.
 
+pub mod binding;
 pub mod hwmon;
 pub mod status;
 mod sysfs;
