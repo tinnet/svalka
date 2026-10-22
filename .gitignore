@@ -1,0 +1,13 @@
+/target
+**/*.rs.bk
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+.env
+.claude/
+.geminiignore
+
+# hk generated hooks
+.hk/

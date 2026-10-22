@@ -1,0 +1,40 @@
+[tools]
+rust = { version = "1.99.1", profile = "default" }
+"github:betterleaks/betterleaks" = "latest"
+hk = "latest"
+pkl = "latest"
+
+[tasks.build]
+run = "cargo build --workspace"
+description = "Compile + run tests"
+depends = ["test"]
+
+[tasks.test]
+run = "cargo test --workspace"
+description = "Run tests only"
+
+[tasks.format]
+alias = "fmt"
+run = "cargo fmt --all"
+description = "Auto-format code"
+
+[tasks.lint]
+run = "cargo clippy --workspace --all-targets -- -D warnings && cargo fmt --all --check"
+description = "Check formatting + lint"
+
+[tasks.package]
+alias = "pkg"
+run = "cargo build --workspace --release"
+description = "Build release binary"
+
+[tasks.status]
+run = "cargo run --quiet -- status"
+description = "Show every temperature, fan and PWM"
+
+[tasks.scan-secrets]
+run = "betterleaks git --pre-commit"
+description = "Scan for secrets in staged changes (pre-commit)"
+
+[tasks.scan-secrets-full]
+run = "betterleaks dir ."
+description = "Scan entire directory for secrets"

@@ -1,0 +1,24 @@
+[package]
+name = "onlycurves"
+description = "Fan control for one PC: temperatures in, PWM out, via piecewise-linear curves"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4.6", features = ["derive"] }
+shadow-rs = "1.7"
+
+[build-dependencies]
+shadow-rs = "1.7"
+
+[dev-dependencies]
+assert_cmd = "2.2"
+predicates = "3.1"
+tempfile = "3"
+
+[lints]
+workspace = true
