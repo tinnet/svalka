@@ -1,8 +1,8 @@
 //! Writing the state snapshot to `/run/onlycurves/state.json`.
 //!
 //! The daemon rewrites the file every tick, so it must live on tmpfs (RAM),
-//! never on the SSD. Each write goes to a temporary file that is then renamed
-//! over the old one, so a reader never sees half a file.
+//! never on the SSD. Each write replaces the file atomically, so a reader
+//! never sees half of it.
 
 use std::fs;
 use std::io;
@@ -11,13 +11,15 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, bail};
 use onlycurves_core::state::Snapshot;
 
+use crate::files;
+
 const FILE_NAME: &str = "state.json";
-const TEMP_NAME: &str = "state.json.tmp";
 
 /// The state file in a directory known to be on tmpfs.
 #[derive(Debug, Clone)]
 pub struct StateFile {
     dir: PathBuf,
+    path: PathBuf,
 }
 
 impl StateFile {
@@ -35,7 +37,10 @@ impl StateFile {
         let mountinfo = fs::read_to_string("/proc/self/mountinfo")
             .context("cannot read /proc/self/mountinfo")?;
         match filesystem_type(&mountinfo, &dir) {
-            Some(fs_type) if fs_type == "tmpfs" => Ok(Self { dir }),
+            Some(fs_type) if fs_type == "tmpfs" => Ok(Self {
+                path: dir.join(FILE_NAME),
+                dir,
+            }),
             Some(fs_type) => bail!(
                 "{} is on {fs_type}, not tmpfs; the state file is rewritten every second and \
                  must not wear out a disk",
@@ -53,8 +58,8 @@ impl StateFile {
 
     /// The path readers use.
     #[must_use]
-    pub fn path(&self) -> PathBuf {
-        self.dir.join(FILE_NAME)
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     /// Replaces the state file with `snapshot`.
@@ -64,9 +69,7 @@ impl StateFile {
     /// Fails when the snapshot cannot be serialized or written.
     pub fn write(&self, snapshot: &Snapshot) -> io::Result<()> {
         let json = snapshot.to_json().map_err(io::Error::other)?;
-        let temp = self.dir.join(TEMP_NAME);
-        fs::write(&temp, json)?;
-        fs::rename(&temp, self.path())
+        files::write_atomically(&self.path, json)
     }
 
     /// Deletes the state file, so a stopped daemon leaves no stale state
@@ -76,10 +79,7 @@ impl StateFile {
     ///
     /// Fails when the file exists but cannot be deleted.
     pub fn remove(&self) -> io::Result<()> {
-        match fs::remove_file(self.path()) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            other => other,
-        }
+        files::remove_if_present(&self.path)
     }
 }
 
@@ -161,7 +161,6 @@ mod tests {
 
         let text = fs::read_to_string(state.path()).unwrap();
         assert_eq!(Snapshot::from_json(&text).unwrap(), snapshot);
-        assert!(!state.dir.join(TEMP_NAME).exists());
 
         state.remove().unwrap();
         assert!(!state.path().exists());

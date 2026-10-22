@@ -12,9 +12,9 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::binding::BoundOutput;
+use crate::files;
 
 const FILE_NAME: &str = "outputs";
-const TEMP_NAME: &str = "outputs.tmp";
 
 /// One output and the `pwmN_enable` mode that hands it back to its chip.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,32 +44,30 @@ impl HeldOutput {
 /// The record file in a state directory.
 #[derive(Debug, Clone)]
 pub struct OutputRecord {
-    dir: PathBuf,
+    path: PathBuf,
 }
 
 impl OutputRecord {
     #[must_use]
     pub fn in_dir(dir: &Path) -> Self {
         Self {
-            dir: dir.to_path_buf(),
+            path: dir.join(FILE_NAME),
         }
     }
 
     #[must_use]
-    pub fn path(&self) -> PathBuf {
-        self.dir.join(FILE_NAME)
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
-    /// Replaces the record with `outputs`, via a temporary file and a rename.
+    /// Replaces the record with `outputs`.
     ///
     /// # Errors
     ///
     /// Fails when the file cannot be written.
     pub fn write(&self, outputs: &[HeldOutput]) -> io::Result<()> {
         let text: String = outputs.iter().map(format_line).collect();
-        let temp = self.dir.join(TEMP_NAME);
-        fs::write(&temp, text)?;
-        fs::rename(&temp, self.path())
+        files::write_atomically(&self.path, text)
     }
 
     /// The recorded outputs, or `None` when there is no record.
@@ -78,7 +76,7 @@ impl OutputRecord {
     ///
     /// Fails when the record exists but cannot be read or parsed.
     pub fn read(&self) -> io::Result<Option<Vec<HeldOutput>>> {
-        let text = match fs::read_to_string(self.path()) {
+        let text = match fs::read_to_string(&self.path) {
             Ok(text) => text,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error),
@@ -103,10 +101,7 @@ impl OutputRecord {
     ///
     /// Fails when the file exists but cannot be deleted.
     pub fn remove(&self) -> io::Result<()> {
-        match fs::remove_file(self.path()) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-            other => other,
-        }
+        files::remove_if_present(&self.path)
     }
 }
 

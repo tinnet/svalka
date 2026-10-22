@@ -5,6 +5,7 @@
 
 pub mod binding;
 pub mod check;
+mod files;
 pub mod hwmon;
 pub mod identify;
 pub mod log;
