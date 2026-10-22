@@ -32,7 +32,7 @@ run = "cargo run --quiet -- status"
 description = "Show every temperature, fan and PWM"
 
 [tasks.scan-secrets]
-run = "betterleaks git --pre-commit"
+run = "betterleaks git --pre-commit --staged"
 description = "Scan for secrets in staged changes (pre-commit)"
 
 [tasks.scan-secrets-full]
