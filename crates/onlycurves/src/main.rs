@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 use onlycurves::{check, identify, notify, restore, run, signals, status};
@@ -62,8 +63,31 @@ struct IdentifyArgs {
     seconds: u64,
 }
 
-fn main() -> anyhow::Result<()> {
+fn main() -> ExitCode {
     let cli = Cli::parse();
+    match run_command(&cli) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("Error: {error:?}");
+            if needs_root(&error) {
+                eprintln!("\nWriting to fans needs root; run this with sudo.");
+            }
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Whether any cause of `error` is a permission error: the one place that
+/// explains it, for every command.
+fn needs_root(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied)
+    })
+}
+
+fn run_command(cli: &Cli) -> anyhow::Result<()> {
     match &cli.command {
         Command::Status(args) => {
             let filter = status::ChipFilter {

@@ -8,7 +8,7 @@ use anyhow::{Context, anyhow};
 use onlycurves_core::config::{Config, ConfigError};
 
 use crate::binding::{self, Bindings};
-use crate::hwmon;
+use crate::hwmon::{self, Chip};
 
 /// A valid config, tied to this PC's hardware.
 #[derive(Debug, Clone)]
@@ -26,8 +26,7 @@ impl Setup {
     /// not match the hardware. Problems are listed one per line.
     pub fn load(config_path: &Path, hwmon_root: &Path) -> anyhow::Result<Self> {
         let config = load_config(config_path)?;
-        let chips = hwmon::discover(hwmon_root)
-            .with_context(|| format!("cannot list hwmon chips in {}", hwmon_root.display()))?;
+        let chips = discover_chips(hwmon_root)?;
         let bindings = binding::bind(&config, &chips)
             .map_err(|problems| invalid(config_path, &ConfigError::Invalid(problems)))?;
         Ok(Self { config, bindings })
@@ -45,7 +44,17 @@ pub fn load_config(path: &Path) -> anyhow::Result<Config> {
     Config::parse(&text).map_err(|error| invalid(path, &error))
 }
 
+/// Every hwmon chip under `hwmon_root`.
+///
+/// # Errors
+///
+/// Fails when `hwmon_root` cannot be listed.
+pub fn discover_chips(hwmon_root: &Path) -> anyhow::Result<Vec<Chip>> {
+    hwmon::discover(hwmon_root)
+        .with_context(|| format!("cannot list hwmon chips in {}", hwmon_root.display()))
+}
+
 /// E.g. `/etc/onlycurves.toml: 2 problem(s): …`, with every problem listed.
-fn invalid(path: &Path, error: &ConfigError) -> anyhow::Error {
+pub(crate) fn invalid(path: &Path, error: &ConfigError) -> anyhow::Error {
     anyhow!("{}: {error}", path.display())
 }

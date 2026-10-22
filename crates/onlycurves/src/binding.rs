@@ -10,7 +10,9 @@ use std::io;
 
 use onlycurves_core::config::{Config, OutputRef, SensorRef};
 
-use crate::hwmon::{self, Chip, HandBack, ManualOverride};
+use anyhow::Context;
+
+use crate::hwmon::{self, Chip, HandBack, ManualOverride, PwmEnable};
 
 /// Labels of inputs that are often unconnected on consumer boards and then
 /// report garbage, such as AUXTIN0 at 84 °C on the B550-I.
@@ -80,32 +82,29 @@ impl BoundOutput {
         self.chip.dir() == other.chip.dir() && self.pwm == other.pwm
     }
 
-    /// Takes the output into manual mode (see [`ManualOverride`]), explaining
-    /// a permission error as the need for root.
+    /// Takes the output into manual mode (see [`ManualOverride`]).
     ///
     /// # Errors
     ///
     /// Fails when the output cannot be read or switched to manual.
     pub fn take_over(&self, hand_back: HandBack) -> anyhow::Result<ManualOverride> {
-        ManualOverride::take(&self.chip, self.pwm, hand_back).map_err(|error| self.explain(error))
+        ManualOverride::take(&self.chip, self.pwm, hand_back)
+            .with_context(|| format!("cannot take over {}", self.describe()))
     }
 
-    /// Sets a raw duty through `manual`, explaining a permission error as the
-    /// need for root.
+    /// The mode that hands this output back to the chip's own curve.
     ///
     /// # Errors
     ///
-    /// Fails when the write is refused.
-    pub fn set(&self, manual: &ManualOverride, raw: u8) -> anyhow::Result<()> {
-        manual.set(raw).map_err(|error| self.explain(error))
-    }
-
-    fn explain(&self, error: io::Error) -> anyhow::Error {
-        if error.kind() == io::ErrorKind::PermissionDenied {
-            anyhow::anyhow!("writing {} needs root; run this with sudo", self.describe())
-        } else {
-            anyhow::Error::new(error).context(format!("cannot take over {}", self.describe()))
-        }
+    /// Fails for chips whose automatic mode onlycurves does not know.
+    pub fn automatic_mode(&self) -> anyhow::Result<PwmEnable> {
+        self.chip.automatic_mode().ok_or_else(|| {
+            anyhow::anyhow!(
+                "{}: onlycurves does not know this chip's automatic mode, so it could not \
+                 hand the fan back; only chips under the nct6775 driver are supported",
+                self.describe()
+            )
+        })
     }
 
     /// The chip the output belongs to.
@@ -149,6 +148,7 @@ pub fn bind(config: &Config, chips: &[Chip]) -> Result<Bindings, Vec<String>> {
         problems.extend(output_problems);
         BTreeMap::new()
     });
+    problems.extend(shared_outputs(&outputs));
 
     if problems.is_empty() {
         Ok(Bindings { sensors, outputs })
@@ -157,8 +157,8 @@ pub fn bind(config: &Config, chips: &[Chip]) -> Result<Bindings, Vec<String>> {
     }
 }
 
-/// Ties only the fan outputs, by fan name. `restore` uses this so that a
-/// broken sensor cannot stop it from handing the fans back.
+/// Ties only the fan outputs, by fan name, and checks nothing else. `restore`
+/// uses this so that no other rule can stop it from handing the fans back.
 ///
 /// # Errors
 ///
@@ -168,20 +168,10 @@ pub fn bind_outputs(
     chips: &[Chip],
 ) -> Result<BTreeMap<String, BoundOutput>, Vec<String>> {
     let mut problems = Vec::new();
-    let mut outputs: BTreeMap<String, BoundOutput> = BTreeMap::new();
+    let mut outputs = BTreeMap::new();
     for (name, fan) in &config.fans {
         match bind_output(&fan.output, chips) {
-            Ok(bound) => {
-                if let Some((other, _)) =
-                    outputs.iter().find(|(_, taken)| taken.same_output(&bound))
-                {
-                    problems.push(format!(
-                        "fan.{other} and fan.{name} both drive {}",
-                        bound.describe()
-                    ));
-                }
-                outputs.insert(name.clone(), bound);
-            }
+            Ok(bound) => _ = outputs.insert(name.clone(), bound),
             Err(problem) => problems.push(format!("fan.{name}: output: {problem}")),
         }
     }
@@ -190,6 +180,24 @@ pub fn bind_outputs(
     } else {
         Err(problems)
     }
+}
+
+/// Two fans on one physical output would fight over it. Compared after the
+/// chips are resolved, so every way of writing the same output is caught.
+fn shared_outputs(outputs: &BTreeMap<String, BoundOutput>) -> Vec<String> {
+    let mut problems = Vec::new();
+    let named: Vec<(&String, &BoundOutput)> = outputs.iter().collect();
+    for (index, (first, output)) in named.iter().enumerate() {
+        for (second, other) in &named[index + 1..] {
+            if output.same_output(other) {
+                problems.push(format!(
+                    "fan.{first} and fan.{second} both drive {}",
+                    output.describe()
+                ));
+            }
+        }
+    }
+    problems
 }
 
 fn bind_sensor(sensor: &SensorRef, chips: &[Chip]) -> Result<BoundSensor, String> {

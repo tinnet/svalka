@@ -118,7 +118,9 @@ fn find_output<'a>(setup: &'a Setup, fan: &str) -> anyhow::Result<&'a BoundOutpu
 /// Switches the output to manual at full duty.
 fn take_over(output: &BoundOutput) -> anyhow::Result<ManualOverride> {
     let manual = output.take_over(HandBack::Saved)?;
-    output.set(&manual, FULL)?;
+    manual
+        .set(FULL)
+        .with_context(|| format!("cannot write {}", output.describe()))?;
     Ok(manual)
 }
 

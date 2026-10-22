@@ -26,13 +26,17 @@ pub struct HeldOutput {
 }
 
 impl HeldOutput {
-    #[must_use]
-    pub fn of(output: &BoundOutput, mode: PwmEnable) -> Self {
-        Self {
+    /// `output`, handed back to its chip's automatic mode.
+    ///
+    /// # Errors
+    ///
+    /// Fails for chips whose automatic mode onlycurves does not know.
+    pub fn of(output: &BoundOutput) -> anyhow::Result<Self> {
+        Ok(Self {
             chip_dir: output.chip().dir().to_path_buf(),
             pwm: output.pwm(),
-            mode,
-        }
+            mode: output.automatic_mode()?,
+        })
     }
 
     /// Whether `other` is the same physical output.
@@ -40,6 +44,18 @@ impl HeldOutput {
     pub fn same_output(&self, other: &HeldOutput) -> bool {
         self.chip_dir == other.chip_dir && self.pwm == other.pwm
     }
+}
+
+/// `outputs` with each physical output once; the first entry for it wins.
+#[must_use]
+pub fn dedup(outputs: impl IntoIterator<Item = HeldOutput>) -> Vec<HeldOutput> {
+    let mut unique: Vec<HeldOutput> = Vec::new();
+    for output in outputs {
+        if !unique.iter().any(|known| known.same_output(&output)) {
+            unique.push(output);
+        }
+    }
+    unique
 }
 
 /// The record file in a state directory.
@@ -160,6 +176,26 @@ mod tests {
         record.remove().unwrap();
         assert_eq!(record.read().unwrap(), None);
         record.remove().unwrap();
+    }
+
+    #[test]
+    fn dedup_keeps_the_first_entry_for_each_output() {
+        let with_mode = |dir: &str, pwm, mode| HeldOutput {
+            chip_dir: PathBuf::from(dir),
+            pwm,
+            mode: PwmEnable::Automatic(mode),
+        };
+
+        let unique = dedup([
+            with_mode("/hwmon7", 2, 5),
+            with_mode("/hwmon7", 2, 3),
+            with_mode("/hwmon7", 1, 5),
+        ]);
+
+        assert_eq!(
+            unique,
+            [with_mode("/hwmon7", 2, 5), with_mode("/hwmon7", 1, 5)]
+        );
     }
 
     #[test]

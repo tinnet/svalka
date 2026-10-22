@@ -30,8 +30,7 @@ impl StateFile {
     /// Fails when the directory cannot be created, its filesystem cannot be
     /// determined, or it is not tmpfs.
     pub fn prepare(dir: &Path) -> anyhow::Result<Self> {
-        fs::create_dir_all(dir)
-            .with_context(|| format!("cannot create {} (run needs root)", dir.display()))?;
+        fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
         let dir =
             fs::canonicalize(dir).with_context(|| format!("cannot resolve {}", dir.display()))?;
         let mountinfo = fs::read_to_string("/proc/self/mountinfo")

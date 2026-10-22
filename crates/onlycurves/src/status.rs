@@ -6,6 +6,7 @@ use std::path::Path;
 use anyhow::Context;
 
 use crate::hwmon::{self, Chip, ChipSnapshot, Fan, Pwm, Temp};
+use crate::setup;
 
 /// Shown in place of a value that could not be read.
 const UNREADABLE: &str = "unreadable";
@@ -23,8 +24,7 @@ pub struct ChipFilter<'a> {
 /// Fails when the chips cannot be listed, the filter does not resolve to one
 /// chip, or a selected chip cannot be read.
 pub fn run(hwmon_root: &Path, filter: &ChipFilter) -> anyhow::Result<String> {
-    let chips = hwmon::discover(hwmon_root)
-        .with_context(|| format!("cannot list hwmon chips in {}", hwmon_root.display()))?;
+    let chips = setup::discover_chips(hwmon_root)?;
     let snapshots = select(&chips, filter)?
         .into_iter()
         .map(read_snapshot)

@@ -12,12 +12,12 @@
 use std::io::Write;
 use std::path::Path;
 
-use anyhow::{Context, anyhow, bail};
+use anyhow::{Context, bail};
 use onlycurves_core::config::ConfigError;
 
 use crate::binding;
-use crate::hwmon::{self, Chip};
-use crate::record::{HeldOutput, OutputRecord};
+use crate::hwmon::Chip;
+use crate::record::{self, HeldOutput, OutputRecord};
 use crate::setup;
 
 /// Hands back every recorded and configured output, reporting each on `out`.
@@ -53,7 +53,7 @@ pub fn run(
     };
 
     let mut failures = Vec::new();
-    for output in union(recorded.unwrap_or_default(), configured) {
+    for output in record::dedup(recorded.unwrap_or_default().into_iter().chain(configured)) {
         match hand_back(&output) {
             Ok(describe) => writeln!(out, "{describe} handed back to the chip, {}", output.mode)?,
             Err(error) => failures.push(format!("{error:#}")),
@@ -73,38 +73,10 @@ pub fn run(
 /// The config's outputs with their chips' automatic modes.
 fn configured_outputs(config_path: &Path, hwmon_root: &Path) -> anyhow::Result<Vec<HeldOutput>> {
     let config = setup::load_config(config_path)?;
-    let chips = hwmon::discover(hwmon_root)
-        .with_context(|| format!("cannot list hwmon chips in {}", hwmon_root.display()))?;
-    let outputs = binding::bind_outputs(&config, &chips).map_err(|problems| {
-        anyhow!(
-            "{}: {}",
-            config_path.display(),
-            ConfigError::Invalid(problems)
-        )
-    })?;
-    outputs
-        .values()
-        .map(|output| {
-            let mode = output.chip().automatic_mode().ok_or_else(|| {
-                anyhow!(
-                    "{}: this chip's automatic mode is unknown",
-                    output.describe()
-                )
-            })?;
-            Ok(HeldOutput::of(output, mode))
-        })
-        .collect()
-}
-
-/// `recorded` followed by the `configured` outputs it does not already hold.
-fn union(recorded: Vec<HeldOutput>, configured: Vec<HeldOutput>) -> Vec<HeldOutput> {
-    let mut all = recorded;
-    for output in configured {
-        if !all.iter().any(|held| held.same_output(&output)) {
-            all.push(output);
-        }
-    }
-    all
+    let chips = setup::discover_chips(hwmon_root)?;
+    let outputs = binding::bind_outputs(&config, &chips)
+        .map_err(|problems| setup::invalid(config_path, &ConfigError::Invalid(problems)))?;
+    outputs.values().map(HeldOutput::of).collect()
 }
 
 /// Writes the output's automatic mode. Returns e.g. `nct6798 pwm2`.
@@ -115,28 +87,4 @@ fn hand_back(output: &HeldOutput) -> anyhow::Result<String> {
     chip.write_pwm_enable(output.pwm, output.mode)
         .with_context(|| format!("cannot write {describe}"))?;
     Ok(describe)
-}
-
-#[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-
-    use super::*;
-    use crate::hwmon::PwmEnable;
-
-    #[test]
-    fn union_keeps_each_output_once_preferring_the_record() {
-        let held = |dir: &str, pwm, mode| HeldOutput {
-            chip_dir: PathBuf::from(dir),
-            pwm,
-            mode: PwmEnable::Automatic(mode),
-        };
-
-        let all = union(
-            vec![held("/hwmon7", 2, 5)],
-            vec![held("/hwmon7", 2, 3), held("/hwmon7", 1, 5)],
-        );
-
-        assert_eq!(all, [held("/hwmon7", 2, 5), held("/hwmon7", 1, 5)]);
-    }
 }

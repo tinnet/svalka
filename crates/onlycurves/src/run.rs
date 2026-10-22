@@ -15,7 +15,7 @@ use std::sync::atomic::Ordering;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, anyhow, bail};
+use anyhow::{Context, bail};
 use onlycurves_core::controller::{FanController, Tick};
 use onlycurves_core::pwm;
 use onlycurves_core::state::{FanMode, FanSnapshot, Snapshot, VERSION};
@@ -24,7 +24,7 @@ use crate::binding::{Bindings, BoundOutput};
 use crate::hwmon::{HandBack, ManualOverride, PwmEnable};
 use crate::log;
 use crate::notify::Notifier;
-use crate::record::{HeldOutput, OutputRecord};
+use crate::record::{self, HeldOutput, OutputRecord};
 use crate::setup::Setup;
 use crate::signals::DaemonSignals;
 use crate::statefile::StateFile;
@@ -297,8 +297,7 @@ fn take_over_fans(setup: &Setup) -> anyhow::Result<Vec<FanLoop>> {
 
 /// Switches `output` to manual, to be handed back to the chip's automatic mode.
 fn take_over(output: &BoundOutput) -> anyhow::Result<ManualOverride> {
-    let mode = firmware_mode(output)?;
-    let manual = output.take_over(HandBack::Automatic(mode))?;
+    let manual = output.take_over(HandBack::Automatic(output.automatic_mode()?))?;
     log::info(format!(
         "took over {} (was {}); it returns to the chip's own curve on exit",
         output.describe(),
@@ -307,29 +306,14 @@ fn take_over(output: &BoundOutput) -> anyhow::Result<ManualOverride> {
     Ok(manual)
 }
 
-/// The chip's automatic mode for `output`, which it is handed back to.
-fn firmware_mode(output: &BoundOutput) -> anyhow::Result<PwmEnable> {
-    output.chip().automatic_mode().ok_or_else(|| {
-        anyhow!(
-            "{}: onlycurves does not know this chip's automatic mode, so it could not \
-             hand the fan back on exit; only nct6775-family chips are supported",
-            output.describe()
-        )
-    })
-}
-
 /// `outputs` as record entries, each physical output once.
 fn held_outputs<'a>(
     outputs: impl Iterator<Item = &'a BoundOutput>,
 ) -> anyhow::Result<Vec<HeldOutput>> {
-    let mut held: Vec<HeldOutput> = Vec::new();
-    for output in outputs {
-        let entry = HeldOutput::of(output, firmware_mode(output)?);
-        if !held.iter().any(|known| known.same_output(&entry)) {
-            held.push(entry);
-        }
-    }
-    Ok(held)
+    let held = outputs
+        .map(HeldOutput::of)
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(record::dedup(held))
 }
 
 /// One tick for every fan. Returns the snapshot to publish.

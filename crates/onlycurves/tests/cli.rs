@@ -345,7 +345,7 @@ fn identify_explains_that_writing_needs_root() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "writing nct6798 pwm1 needs root; run this with sudo",
+            "Writing to fans needs root; run this with sudo.",
         ));
 }
 

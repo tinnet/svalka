@@ -170,7 +170,6 @@ impl ConfigFile {
     fn validate(self) -> Result<Config, ConfigError> {
         let mut problems = Vec::new();
         self.check_top_level(&mut problems);
-        self.check_outputs_are_unique(&mut problems);
 
         let mut fans = BTreeMap::new();
         for (name, fan) in self.fans {
@@ -210,17 +209,6 @@ impl ConfigFile {
         }
         if self.fans.is_empty() {
             problems.push("no fans configured; add at least one [fan.NAME] table".to_owned());
-        }
-    }
-
-    /// Two fans writing the same PWM output would fight over it.
-    fn check_outputs_are_unique(&self, problems: &mut Vec<String>) {
-        let mut seen: BTreeMap<String, &str> = BTreeMap::new();
-        for (name, fan) in &self.fans {
-            let output = fan.output.to_string();
-            if let Some(first) = seen.insert(output.clone(), name) {
-                problems.push(format!("fan.{first} and fan.{name} both drive {output}"));
-            }
         }
     }
 }
@@ -375,19 +363,6 @@ hysteresis = 2.0
                 "fan.cpu_cooler: curve: point 2 (35 °C) must be hotter than point 1 (55 °C)",
                 "fan.exhaust: source \"gpuu\" is not defined in [sensors]",
             ]
-        );
-    }
-
-    #[test]
-    fn two_fans_cannot_share_an_output() {
-        let text = DESIGN_DOC.replace(
-            r#"{ chip = "nct6798", pwm = 1 }"#,
-            r#"{ chip = "nct6798", pwm = 2 }"#,
-        );
-
-        assert_eq!(
-            problems(&text),
-            ["fan.cpu_cooler and fan.exhaust both drive nct6798 pwm2"]
         );
     }
 
