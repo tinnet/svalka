@@ -109,7 +109,8 @@ impl FanController {
 
     /// This fan's readings, or why they cannot be trusted. Records every
     /// readable value as the next tick's "previous", even on failure, so one
-    /// real jump causes one failsafe tick rather than many.
+    /// real jump causes one failsafe tick rather than many. An unreadable
+    /// source has no "previous".
     fn check_sources(
         &mut self,
         readings: &BTreeMap<String, Option<f64>>,
@@ -121,6 +122,9 @@ impl FanController {
                 problem.get_or_insert(Failsafe::Unreadable {
                     source: source.clone(),
                 });
+                // Its next reading may come much later; comparing that with
+                // this old value would report heat built up meanwhile as a jump.
+                self.previous.remove(source);
                 continue;
             };
             if let Some(&from) = self.previous.get(source)
@@ -291,6 +295,17 @@ hysteresis = 2.0
         );
         assert_eq!(after.failsafe, None);
         assert!((after.duty - 100.0).abs() < 1e-9); // 90 °C is past the curve's end
+    }
+
+    #[test]
+    fn a_sensor_coming_back_is_not_compared_with_its_old_value() {
+        let mut fan = controller("0s");
+        fan.tick(&readings(Some(45.0), Some(40.0)));
+        fan.tick(&readings(None, Some(40.0))); // cpu unreadable for a while
+
+        let back = fan.tick(&readings(Some(70.0), Some(40.0)));
+
+        assert_eq!(back.failsafe, None);
     }
 
     #[test]
