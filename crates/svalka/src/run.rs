@@ -161,7 +161,7 @@ impl<'a> Daemon<'a> {
 
     /// One tick, then the state file and systemd's watchdog and status.
     fn tick_and_publish(&mut self) -> anyhow::Result<()> {
-        let sensors = binding::read_sensors(&self.sensors);
+        let sensors = binding::read_sensors(&mut self.sensors);
         let readback = self.readback_due();
         let mut fans = BTreeMap::new();
         for fan in &mut self.fans {
@@ -812,6 +812,24 @@ curve   = [[40, 40], [60, 60]]
 
             assert_eq!(pwm2(sysfs).1, "5");
             assert!(!state.exists() && !record.exists());
+        });
+    }
+
+    #[test]
+    fn a_sensor_whose_driver_comes_back_as_another_chip_is_found_again() {
+        with_daemon(|sysfs, daemon| {
+            // `modprobe -r k10temp`: the input is gone, so the fan runs at failsafe.
+            fs::remove_dir_all(sysfs.hwmon_root().join("hwmon3")).unwrap();
+            daemon.tick_and_publish().unwrap();
+            assert_eq!(pwm2(sysfs).0, "255");
+
+            // `modprobe k10temp`, but the kernel numbers it hwmon8 this time.
+            sysfs
+                .chip("hwmon8", "k10temp", "pci0000:00/0000:00:18.3")
+                .attr("temp1_input", "50000")
+                .attr("temp1_label", "Tctl");
+            daemon.tick_and_publish().unwrap();
+            assert_eq!(pwm2(sysfs), ("128".into(), "1".into()));
         });
     }
 

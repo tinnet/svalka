@@ -23,7 +23,8 @@ const FLOATING_LABEL_PREFIX: &str = "AUXTIN";
 pub struct BoundSensor {
     chip: Chip,
     index: u32,
-    label: String,
+    /// What the config asked for, to find the input again if its chip moves.
+    source: SensorRef,
 }
 
 impl BoundSensor {
@@ -36,10 +37,51 @@ impl BoundSensor {
         self.chip.read_temp(self.index)
     }
 
+    /// Reads the temperature in °C, looking the chip up again first if the read
+    /// fails: a reloaded driver (`modprobe -r k10temp; modprobe k10temp`) can
+    /// come back as another `hwmonN`, and the old directory never returns.
+    ///
+    /// # Errors
+    ///
+    /// Fails when the input cannot be read, before or after the lookup.
+    pub fn read_or_find_again(&mut self) -> io::Result<f64> {
+        self.read_celsius().or_else(|error| {
+            if self.find_again() {
+                self.read_celsius()
+            } else {
+                Err(error)
+            }
+        })
+    }
+
+    /// Binds to the chip that now matches the config, under the hwmon root the
+    /// old one was found in. Keeps the old binding when nothing matches, so the
+    /// next read tries again.
+    fn find_again(&mut self) -> bool {
+        let Some(chips) = self
+            .chip
+            .dir()
+            .parent()
+            .and_then(|hwmon_root| hwmon::discover(hwmon_root).ok())
+        else {
+            return false;
+        };
+        let Ok(chip) = hwmon::resolve(&chips, &self.source.chip, self.source.path.as_deref())
+        else {
+            return false;
+        };
+        let Ok(index) = find_labelled_temp(chip, &self.source.label) else {
+            return false;
+        };
+        self.chip = chip.clone();
+        self.index = index;
+        true
+    }
+
     /// E.g. `k10temp Tctl`.
     #[must_use]
     pub fn describe(&self) -> String {
-        format!("{} {}", self.chip.name(), self.label)
+        format!("{} {}", self.chip.name(), self.source.label)
     }
 }
 
@@ -130,12 +172,13 @@ pub struct Bindings {
     pub outputs: BTreeMap<String, BoundOutput>,
 }
 
-/// Every sensor's temperature by name, or `None` when it cannot be read.
-#[must_use]
-pub fn read_sensors(sensors: &BTreeMap<String, BoundSensor>) -> BTreeMap<String, Option<f64>> {
+/// Every sensor's temperature by name, or `None` when it cannot be read. A
+/// sensor whose chip moved is bound to it again (see
+/// [`BoundSensor::read_or_find_again`]).
+pub fn read_sensors(sensors: &mut BTreeMap<String, BoundSensor>) -> BTreeMap<String, Option<f64>> {
     sensors
-        .iter()
-        .map(|(name, sensor)| (name.clone(), sensor.read_celsius().ok()))
+        .iter_mut()
+        .map(|(name, sensor)| (name.clone(), sensor.read_or_find_again().ok()))
         .collect()
 }
 
@@ -223,7 +266,7 @@ fn bind_sensor(sensor: &SensorRef, chips: &[Chip]) -> Result<BoundSensor, String
     let bound = BoundSensor {
         chip: chip.clone(),
         index,
-        label: sensor.label.clone(),
+        source: sensor.clone(),
     };
     check_plausible(&bound)?;
     Ok(bound)

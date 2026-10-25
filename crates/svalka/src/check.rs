@@ -47,15 +47,15 @@ struct Report {
 /// Fails when the file cannot be read, the config is invalid, it does not
 /// match the hardware, or an output cannot be read.
 pub fn run(config_path: &Path, hwmon_root: &Path) -> anyhow::Result<String> {
-    let setup = Setup::load(config_path, hwmon_root)?;
-    let report = read_report(&setup)?;
+    let mut setup = Setup::load(config_path, hwmon_root)?;
+    let report = read_report(&mut setup)?;
     Ok(render(config_path, &report))
 }
 
 /// Reads every sensor once and runs each fan's controller for one tick on
 /// those readings, exactly as `run`'s first tick would.
-fn read_report(setup: &Setup) -> anyhow::Result<Report> {
-    let readings = binding::read_sensors(&setup.bindings.sensors);
+fn read_report(setup: &mut Setup) -> anyhow::Result<Report> {
+    let readings = binding::read_sensors(&mut setup.bindings.sensors);
     let sensors = setup
         .bindings
         .sensors
