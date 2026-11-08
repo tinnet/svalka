@@ -155,7 +155,9 @@ exits for any reason, including `kill -9`. It hands back every output that
 `run` recorded as held in `/run/svalka/outputs`, plus every output in the
 config. The record is what counts: the config on disk may have been edited or
 broken since `run` read it, so it is only required when there is no record.
-Sensors are never checked, so a broken sensor cannot block it.
+Sensors are never checked, so a broken sensor cannot block it. An output whose
+chip is gone, as can happen during shutdown, has nothing to hand back: `restore`
+says so and carries on, and this does not count as a failure.
 
 ## As a systemd service
 

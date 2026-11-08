@@ -12,7 +12,7 @@ use svalka_core::config::{Config, OutputRef, SensorRef};
 
 use anyhow::Context;
 
-use crate::hwmon::{self, Chip, HandBack, ManualOverride, PwmEnable};
+use crate::hwmon::{self, Chip, HandBack, ManualOverride, PwmEnable, ResolveError};
 
 /// Labels of inputs that are often unconnected on consumer boards and then
 /// report garbage, such as an AUXTIN reading 84 °C with nothing attached.
@@ -210,13 +210,8 @@ pub fn bind(config: &Config, chips: &[Chip]) -> Result<Bindings, Vec<String>> {
     }
 }
 
-/// Ties only the fan outputs, by fan name, and checks nothing else. `restore`
-/// uses this so that no other rule can stop it from handing the fans back.
-///
-/// # Errors
-///
-/// Returns one message per output that cannot be bound.
-pub fn bind_outputs(
+/// Ties only the fan outputs, by fan name, and checks nothing else.
+fn bind_outputs(
     config: &Config,
     chips: &[Chip],
 ) -> Result<BTreeMap<String, BoundOutput>, Vec<String>> {
@@ -230,6 +225,48 @@ pub fn bind_outputs(
     }
     if problems.is_empty() {
         Ok(outputs)
+    } else {
+        Err(problems)
+    }
+}
+
+/// The config's fan outputs as `restore` sees them.
+#[derive(Debug, Default)]
+pub struct PresentOutputs {
+    pub bound: Vec<BoundOutput>,
+    /// Fan names and why their chip was not found.
+    pub gone: Vec<(String, ResolveError)>,
+}
+
+/// Ties the fan outputs and checks nothing else, so that no other rule can stop
+/// `restore` from handing the fans back. A chip that is not there is kept apart
+/// from real problems: its output has nothing left to hand back, and it must not
+/// stop the other fans. This happens during shutdown.
+///
+/// # Errors
+///
+/// Returns one message per output that cannot be bound though its chip may exist.
+pub fn bind_present_outputs(
+    config: &Config,
+    chips: &[Chip],
+) -> Result<PresentOutputs, Vec<String>> {
+    let mut problems = Vec::new();
+    let mut present = PresentOutputs::default();
+    for (name, fan) in &config.fans {
+        let output = &fan.output;
+        if let Err(error @ ResolveError::NotFound { .. }) =
+            hwmon::resolve(chips, &output.chip, output.path.as_deref())
+        {
+            present.gone.push((name.clone(), error));
+            continue;
+        }
+        match bind_output(output, chips) {
+            Ok(bound) => present.bound.push(bound),
+            Err(problem) => problems.push(format!("fan.{name}: output: {problem}")),
+        }
+    }
+    if problems.is_empty() {
+        Ok(present)
     } else {
         Err(problems)
     }

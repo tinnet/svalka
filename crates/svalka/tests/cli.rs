@@ -522,6 +522,83 @@ fn restore_fails_without_record_or_config() {
         .failure();
 }
 
+#[test]
+fn restore_has_nothing_to_do_when_the_configured_chip_is_gone() {
+    let sysfs = FakeSysfs::example_pc();
+    let config = sysfs.config(&example_config());
+    let state_dir = tempfile::tempdir().unwrap();
+    fs::remove_dir_all(sysfs.hwmon_root().join("hwmon7")).unwrap();
+
+    sysfs
+        .svalka_with(&config, state_dir.path(), "restore")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            r#"fan.cpu_cooler: nothing to hand back: no hwmon chip named "nct6798""#,
+        ));
+}
+
+#[test]
+fn restore_still_hands_back_the_fans_whose_chip_is_there() {
+    let sysfs = FakeSysfs::example_pc();
+    let text = example_config().replace(
+        r#"output     = { chip = "nct6798", pwm = 1 }"#,
+        r#"output     = { chip = "nct6799", pwm = 1 }"#,
+    );
+    let config = sysfs.config(&text);
+    let state_dir = tempfile::tempdir().unwrap();
+
+    sysfs
+        .svalka_with(&config, state_dir.path(), "restore")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            r#"fan.exhaust: nothing to hand back: no hwmon chip named "nct6799""#,
+        ))
+        .stdout(predicate::str::contains(
+            "nct6798 pwm2 handed back to the chip, automatic (5)",
+        ));
+    assert_eq!(nct6798_attribute(&sysfs, "pwm2_enable"), "5");
+}
+
+#[test]
+fn restore_has_nothing_to_do_when_the_recorded_chip_is_gone() {
+    let sysfs = FakeSysfs::example_pc();
+    let config = sysfs.config(&example_config());
+    let state_dir = tempfile::tempdir().unwrap();
+    let chip_dir = sysfs.hwmon_root().join("hwmon7");
+    let record = state_dir.path().join("outputs");
+    fs::write(&record, format!("5 2 {}\n", chip_dir.display())).unwrap();
+    fs::remove_dir_all(&chip_dir).unwrap();
+
+    sysfs
+        .svalka_with(&config, state_dir.path(), "restore")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "{} pwm2: nothing to hand back: the chip is gone",
+            chip_dir.display()
+        )));
+    assert!(!record.exists());
+}
+
+#[test]
+fn restore_still_fails_when_a_chip_is_ambiguous_rather_than_gone() {
+    let sysfs = FakeSysfs::example_pc();
+    let text = example_config().replace(
+        r#"output     = { chip = "nct6798", pwm = 1 }"#,
+        r#"output     = { chip = "nvme", pwm = 1 }"#,
+    );
+    let config = sysfs.config(&text);
+    let state_dir = tempfile::tempdir().unwrap();
+
+    sysfs
+        .svalka_with(&config, state_dir.path(), "restore")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("add a device path"));
+}
+
 /// A socket standing in for systemd's `NOTIFY_SOCKET`.
 struct FakeSystemd {
     _dir: TempDir,

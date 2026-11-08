@@ -8,6 +8,8 @@
 //! may have changed or broken since `run` read it, so a config that does not
 //! load is only fatal when there is no record. Sensors are never bound, so a
 //! broken sensor cannot block it, and it keeps going past an output that fails.
+//! An output whose chip is gone has nothing to hand back, which is not a
+//! failure: chips can disappear during shutdown.
 
 use std::io::Write;
 use std::path::Path;
@@ -40,7 +42,7 @@ pub fn run(
             None
         }
     };
-    let configured = match (configured_outputs(config_path, hwmon_root), &recorded) {
+    let configured = match (configured_outputs(config_path, hwmon_root, out), &recorded) {
         (Ok(configured), _) => configured,
         (Err(error), Some(_)) => {
             writeln!(
@@ -54,6 +56,15 @@ pub fn run(
 
     let mut failures = Vec::new();
     for output in record::dedup(recorded.unwrap_or_default().into_iter().chain(configured)) {
+        if matches!(output.chip_dir.try_exists(), Ok(false)) {
+            writeln!(
+                out,
+                "{} pwm{}: nothing to hand back: the chip is gone",
+                output.chip_dir.display(),
+                output.pwm
+            )?;
+            continue;
+        }
         match hand_back(&output) {
             Ok(describe) => writeln!(out, "{describe} handed back to the chip, {}", output.mode)?,
             Err(error) => failures.push(format!("{error:#}")),
@@ -70,13 +81,21 @@ pub fn run(
         .with_context(|| format!("cannot remove {}", record.path().display()))
 }
 
-/// The config's outputs with their chips' automatic modes.
-fn configured_outputs(config_path: &Path, hwmon_root: &Path) -> anyhow::Result<Vec<HeldOutput>> {
+/// The config's outputs with their chips' automatic modes. Says on `out` which
+/// ones are skipped because their chip is gone.
+fn configured_outputs(
+    config_path: &Path,
+    hwmon_root: &Path,
+    out: &mut impl Write,
+) -> anyhow::Result<Vec<HeldOutput>> {
     let config = setup::load_config(config_path)?;
     let chips = setup::discover_chips(hwmon_root)?;
-    let outputs = binding::bind_outputs(&config, &chips)
+    let present = binding::bind_present_outputs(&config, &chips)
         .map_err(|problems| setup::invalid(config_path, &ConfigError::Invalid(problems)))?;
-    outputs.values().map(HeldOutput::of).collect()
+    for (fan, error) in &present.gone {
+        writeln!(out, "fan.{fan}: nothing to hand back: {error}")?;
+    }
+    present.bound.iter().map(HeldOutput::of).collect()
 }
 
 /// Writes the output's automatic mode. Returns e.g. `nct6798 pwm2`.
