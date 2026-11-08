@@ -123,6 +123,45 @@ The nct6775 driver refreshes readings every 1.5–2 s, hence the pairs. If
 another program writes the output during the test, `identify` stops and
 restores it. Ctrl-C and SIGTERM also restore before exiting.
 
+### `sudo svalka sweep FAN`
+
+Steps one fan from 100 % down to 0 and back up in 5 % steps (`--step N` to
+change), waits at each step until the speed settles, and prints duty against
+rpm. Then it restores the output's duty and mode and says where the fan stops
+on the way down, where it starts again on the way up, and suggests a
+`min_duty` one step above the start duty. Readings are 2 s apart, so a sweep
+takes 3–5 minutes.
+
+```console
+$ sudo svalka sweep cpu_cooler
+Sweeping cpu_cooler (nct6798 pwm2) from 100 % to 0 and back in 5 % steps. Ctrl-C stops it and restores the output.
+
+down  100 %   2093 rpm
+down   95 %   2027 rpm
+...
+down   20 %    588 rpm
+down   15 %    382 rpm
+down   10 %      0 rpm
+...
+up     15 %      0 rpm
+up     20 %    527 rpm
+up     25 %    666 rpm
+...
+up    100 %   2125 rpm
+
+Restored nct6798 pwm2 to 96/255, automatic (5).
+cpu_cooler stops at 10 % on the way down and starts again at 20 % on the way up.
+Suggested: min_duty = 25 for fan.cpu_cooler, one step above the start duty.
+```
+
+A fan keeps turning below the duty it needs to start from a standstill, so
+`min_duty` goes above the start duty, not the stop duty.
+
+`svalka run` must be stopped first (`sudo systemctl stop svalka`); `sweep`
+refuses an output that `run` holds. It stops early and restores the output
+if one of the fan's sources reaches 80 °C or cannot be read, if another
+program writes the output, or on Ctrl-C and SIGTERM.
+
 ### `sudo svalka run`
 
 The control loop. It takes every configured fan into manual mode, then once
@@ -211,6 +250,7 @@ crates/svalka/          the daemon and CLI (library + thin main.rs)
   src/status.rs             the `status` command
   src/check.rs              the `check` command
   src/identify.rs           the `identify` command
+  src/sweep.rs              the `sweep` command
   src/run.rs                the `run` command: the control loop
   src/restore.rs            the `restore` command
   src/record.rs             /run/svalka/outputs: what run holds, for restore

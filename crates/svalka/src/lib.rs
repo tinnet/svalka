@@ -17,4 +17,5 @@ pub mod setup;
 pub mod signals;
 pub mod statefile;
 pub mod status;
+pub mod sweep;
 mod sysfs;

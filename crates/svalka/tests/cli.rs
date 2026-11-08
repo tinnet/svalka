@@ -365,6 +365,74 @@ fn identify_explains_that_writing_needs_root() {
         ));
 }
 
+#[test]
+fn sweep_steps_the_fan_and_restores_its_output() {
+    let sysfs = FakeSysfs::example_pc();
+    let config = sysfs.config(&example_config());
+    let state_dir = tempfile::tempdir().unwrap();
+
+    sysfs
+        .svalka_with(&config, state_dir.path(), "sweep")
+        .args(["exhaust", "--step", "50", "--sample-ms", "1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "Sweeping exhaust (nct6798 pwm1) from 100 % to 0 and back in 50 % steps.",
+        ))
+        .stdout(predicate::str::contains(
+            "down  100 %    971 rpm\ndown   50 %    971 rpm\ndown    0 %    971 rpm\n\
+             up     50 %    971 rpm\nup    100 %    971 rpm\n",
+        ))
+        .stdout(predicate::str::contains(
+            "Restored nct6798 pwm1 to 102/255, manual (1).",
+        ))
+        .stdout(predicate::str::contains(
+            "exhaust kept spinning even at 0 %",
+        ));
+
+    assert_eq!(nct6798_attribute(&sysfs, "pwm1"), "102");
+}
+
+#[test]
+fn sweep_refuses_a_fan_that_run_is_controlling() {
+    let sysfs = FakeSysfs::example_pc();
+    let config = sysfs.config(&example_config());
+    let state_dir = tempfile::tempdir().unwrap();
+    let chip_dir = sysfs.hwmon_root().join("hwmon7");
+    fs::write(
+        state_dir.path().join("outputs"),
+        format!("5 1 {}\n", chip_dir.display()),
+    )
+    .unwrap();
+
+    sysfs
+        .svalka_with(&config, state_dir.path(), "sweep")
+        .arg("exhaust")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "svalka run is controlling nct6798 pwm1. Stop it first",
+        ));
+
+    assert_eq!(nct6798_attribute(&sysfs, "pwm1_enable"), "1");
+}
+
+#[test]
+fn sweep_needs_a_tachometer() {
+    let sysfs = FakeSysfs::example_pc();
+    let config = sysfs.config(&example_config());
+    let state_dir = tempfile::tempdir().unwrap();
+
+    sysfs
+        .svalka_with(&config, state_dir.path(), "sweep")
+        .arg("cpu_cooler")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "nct6798 pwm2 has no tachometer fan2, so sweep cannot see the fan's speed",
+        ));
+}
+
 /// Reads one attribute of the fake nct6798.
 fn nct6798_attribute(sysfs: &FakeSysfs, file: &str) -> String {
     fs::read_to_string(sysfs.hwmon_root().join("hwmon7").join(file))

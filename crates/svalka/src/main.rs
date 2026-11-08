@@ -3,7 +3,9 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 use shadow_rs::shadow;
-use svalka::{check, identify, notify, restore, run, signals, status};
+use std::time::Duration;
+
+use svalka::{check, identify, notify, restore, run, signals, status, sweep};
 
 shadow!(build);
 
@@ -36,6 +38,8 @@ enum Command {
     Check,
     /// Run one fan at 100 % for a few seconds, then restore it (needs root)
     Identify(IdentifyArgs),
+    /// Step one fan from 100 % to 0 and back, to find where it stops and starts (needs root)
+    Sweep(SweepArgs),
     /// Control the fans until stopped, then hand them back to the chip (needs root)
     Run,
     /// Hand every configured fan back to the chip's own curve (needs root)
@@ -61,6 +65,20 @@ struct IdentifyArgs {
     /// How long to run the fan at full speed
     #[arg(long, default_value_t = 5)]
     seconds: u64,
+}
+
+#[derive(Args)]
+struct SweepArgs {
+    /// Fan name from the config, e.g. exhaust
+    fan: String,
+
+    /// Percent between steps
+    #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u8).range(1..=50))]
+    step: u8,
+
+    /// Milliseconds between tachometer readings. Only tests change it.
+    #[arg(long, hide = true, default_value_t = 2000)]
+    sample_ms: u64,
 }
 
 fn main() -> ExitCode {
@@ -110,6 +128,20 @@ fn run_command(cli: &Cli) -> anyhow::Result<()> {
                 &stop,
                 &mut std::io::stdout(),
             )?;
+        }
+        Command::Sweep(args) => {
+            let paths = run::Paths {
+                config: &cli.config,
+                hwmon_root: &cli.hwmon_root,
+                state_dir: &cli.state_dir,
+            };
+            let options = sweep::Options {
+                fan: &args.fan,
+                step: args.step,
+                sample: Duration::from_millis(args.sample_ms),
+            };
+            let stop = signals::stop_flag()?;
+            sweep::run(&paths, &options, &stop, &mut std::io::stdout())?;
         }
         Command::Run => {
             let paths = run::Paths {
