@@ -478,6 +478,10 @@ fn run_drives_the_fans_and_hands_them_back_on_sigterm() {
     assert_eq!(snapshot.fans["exhaust"].rpm, Some(971));
     let record = fs::read_to_string(state_dir.path().join("outputs")).unwrap();
     assert_eq!(record.lines().count(), 2, "{record}");
+    let history =
+        svalka_core::history::parse(&fs::read_to_string(state_dir.path().join("history")).unwrap());
+    assert!(history[0].readback, "the first tick reads the outputs back");
+    assert_eq!(history[0].fans["cpu_cooler"].pwm_raw, 122);
 
     signal(&child, "TERM");
     let output = child.wait_with_output().unwrap();
@@ -495,6 +499,10 @@ fn run_drives_the_fans_and_hands_them_back_on_sigterm() {
         "a stopped daemon leaves no state behind"
     );
     assert!(!state_dir.path().join("outputs").exists());
+    assert!(
+        state_dir.path().join("history").exists(),
+        "the history outlives a stop, for the next start"
+    );
 }
 
 #[test]
@@ -750,4 +758,127 @@ fn run_talks_to_systemd_and_reloads_on_sighup() {
     assert!(output.status.success(), "{stderr}");
     assert!(stderr.contains("reloaded"), "{stderr}");
     assert_eq!(nct6798_attribute(&sysfs, "pwm2_enable"), "5");
+}
+
+/// Writes a minute of history for `cpu_cooler`, ending 1 s ago: 45 °C at 35 %
+/// with a hot spell of 70 °C at 80 %, rpm every tenth tick.
+fn write_history(state_dir: &Path) {
+    use svalka_core::history::{Line, VERSION};
+    use svalka_core::state::{FanMode, FanSnapshot};
+
+    let now = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    let text: String = (0..60u64)
+        .map(|second| {
+            let hot = (20..40).contains(&second);
+            let readback = second.is_multiple_of(10);
+            let celsius = if hot { 70.0 } else { 45.0 };
+            let line = Line {
+                version: VERSION,
+                unix_millis: now - 61_000 + second * 1000,
+                readback,
+                sensors: [("cpu".to_owned(), Some(celsius))].into(),
+                fans: [(
+                    "cpu_cooler".to_owned(),
+                    FanSnapshot {
+                        output: "nct6798 pwm2".into(),
+                        mode: FanMode::Normal,
+                        source: Some("cpu".into()),
+                        celsius: Some(celsius),
+                        smoothed_celsius: Some(celsius),
+                        effective_celsius: Some(celsius),
+                        duty: if hot { 80.0 } else { 35.0 },
+                        pwm_raw: 0,
+                        pwm_enable: readback.then_some(1),
+                        rpm: readback.then_some(if hot { 1800 } else { 1000 }),
+                    },
+                )]
+                .into(),
+            };
+            line.to_json().unwrap() + "\n"
+        })
+        .collect();
+    fs::write(state_dir.join("history"), text).unwrap();
+}
+
+/// `svalka --state-dir <state_dir> history <args…>`: needs no config or hardware.
+fn svalka_history(state_dir: &Path, args: &[&str]) -> Command {
+    let mut command = svalka_bin();
+    command
+        .arg("--state-dir")
+        .arg(state_dir)
+        .arg("history")
+        .args(args);
+    command
+}
+
+#[test]
+fn history_draws_each_fan_as_sparklines() {
+    let state_dir = tempfile::tempdir().unwrap();
+    write_history(state_dir.path());
+
+    svalka_history(state_dir.path(), &[])
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with(
+            "Last 59 s, 60 ticks; the newest is ",
+        ))
+        .stdout(predicate::str::contains("cpu_cooler  nct6798 pwm2\n"))
+        .stdout(predicate::str::contains("45.0–70.0 °C, now 45.0 °C (cpu)"))
+        .stdout(predicate::str::contains("35–80 %, now 35 %"))
+        .stdout(predicate::str::contains("1000–1800 rpm, now 1000 rpm"))
+        .stdout(predicate::str::contains("▁▁▁▁▇▇▇▇"));
+}
+
+#[test]
+fn history_since_and_json_print_the_recent_ticks_as_lines() {
+    let state_dir = tempfile::tempdir().unwrap();
+    write_history(state_dir.path());
+
+    let output = svalka_history(
+        state_dir.path(),
+        &["cpu_cooler", "--since", "10s", "--json"],
+    )
+    .output()
+    .unwrap();
+
+    assert!(output.status.success());
+    let lines = svalka_core::history::parse(&String::from_utf8(output.stdout).unwrap());
+    // The minute ended 1 s ago, so the last 10 s hold about 9 of its ticks.
+    assert!((8..=10).contains(&lines.len()), "{}", lines.len());
+    assert!(
+        lines
+            .iter()
+            .all(|line| line.fans.contains_key("cpu_cooler"))
+    );
+}
+
+#[test]
+fn history_lists_the_fans_when_the_name_is_unknown() {
+    let state_dir = tempfile::tempdir().unwrap();
+    write_history(state_dir.path());
+
+    svalka_history(state_dir.path(), &["pump"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            r#"no fan "pump" in the history; it has cpu_cooler"#,
+        ));
+}
+
+#[test]
+fn history_explains_where_history_comes_from_when_there_is_none() {
+    let state_dir = tempfile::tempdir().unwrap();
+
+    svalka_history(state_dir.path(), &[])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "`svalka run` writes it while it runs",
+        ));
 }

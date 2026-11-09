@@ -2,7 +2,8 @@
 //!
 //! Startup takes every configured fan output into manual mode. Each tick reads
 //! every sensor once, lets each fan's [`FanController`] pick a duty, writes it
-//! when it changed, writes the state snapshot and pets systemd's watchdog.
+//! when it changed, writes the state snapshot, appends it to the history and
+//! pets systemd's watchdog.
 //! SIGHUP reloads the config. On exit (SIGINT, SIGTERM or an error) every
 //! output goes back to the chip's own automatic mode, so the BIOS curve runs
 //! the fans.
@@ -16,10 +17,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, bail};
 use svalka_core::controller::{FanController, Tick};
+use svalka_core::history::Line;
 use svalka_core::pwm;
 use svalka_core::state::{FanMode, FanSnapshot, Snapshot, VERSION};
 
 use crate::binding::{self, BoundOutput, BoundSensor};
+use crate::historyfile::HistoryFile;
 use crate::hwmon::{HandBack, ManualOverride, PwmEnable, PwmState};
 use crate::log;
 use crate::notify::Notifier;
@@ -86,10 +89,12 @@ struct Daemon<'a> {
     sensors: BTreeMap<String, BoundSensor>,
     fans: Vec<FanLoop>,
     state_file: StateFile,
+    history: HistoryFile,
     /// The outputs we hold, for `restore`.
     record: OutputRecord,
     notifier: &'a Notifier,
     state_write_failing: Episode,
+    history_write_failing: Episode,
     /// Appended to systemd's status line, e.g. after a failed reload.
     status_note: Option<&'static str>,
     /// The status line systemd has, so it is only sent when it changes.
@@ -116,9 +121,11 @@ impl<'a> Daemon<'a> {
             sensors: BTreeMap::new(),
             fans: Vec::new(),
             record: OutputRecord::in_dir(state_file.dir()),
+            history: HistoryFile::open(state_file.dir()),
             state_file,
             notifier,
             state_write_failing: Episode::default(),
+            history_write_failing: Episode::default(),
             status_note: None,
             sent_status: String::new(),
         }
@@ -159,7 +166,8 @@ impl<'a> Daemon<'a> {
         }
     }
 
-    /// One tick, then the state file and systemd's watchdog and status.
+    /// One tick, then the state file, the history and systemd's watchdog and
+    /// status.
     fn tick_and_publish(&mut self) -> anyhow::Result<()> {
         let sensors = binding::read_sensors(&mut self.sensors);
         let readback = self.readback_due();
@@ -174,6 +182,7 @@ impl<'a> Daemon<'a> {
             fans,
         };
         self.write_state(&snapshot);
+        self.append_history(&Line::of(&snapshot, readback));
         self.notifier.watchdog();
         self.publish_status(&snapshot);
         Ok(())
@@ -200,6 +209,20 @@ impl<'a> Daemon<'a> {
                 self.state_file.path().display()
             )),
             (Some(Edge::Ended), _) => log::info("writing the state file works again"),
+            _ => {}
+        }
+    }
+
+    /// Appends the tick to the history, logging a failure once, like
+    /// [`Daemon::write_state`].
+    fn append_history(&mut self, line: &Line) {
+        let result = self.history.append(line);
+        match (self.history_write_failing.observe(result.is_err()), result) {
+            (Some(Edge::Began), Err(error)) => log::error(format!(
+                "cannot append to {}: {error}",
+                self.history.path().display()
+            )),
+            (Some(Edge::Ended), _) => log::info("appending to the history works again"),
             _ => {}
         }
     }
@@ -305,6 +328,8 @@ impl<'a> Daemon<'a> {
             .with_context(|| format!("cannot write {}", self.record.path().display()))
     }
 
+    /// Hands the fans back and removes the state file and record. The history
+    /// stays, so a restart does not lose the recent past.
     fn shut_down(self) {
         hand_back_all(self.fans);
         let removals = [
@@ -676,7 +701,9 @@ fn hand_back_all(fans: Vec<FanLoop>) {
     }
 }
 
-fn unix_millis() -> u64 {
+/// The current time in milliseconds since the Unix epoch, as snapshots carry it.
+#[must_use]
+pub fn unix_millis() -> u64 {
     let since_epoch = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();

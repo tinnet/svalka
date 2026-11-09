@@ -17,6 +17,9 @@ Restart=on-failure
 RestartSec=2s
 RuntimeDirectory=svalka
 RuntimeDirectoryMode=0755
+# Keep /run/svalka across restarts, so the history survives them. A stop
+# still removes it.
+RuntimeDirectoryPreserve=restart
 
 NoNewPrivileges=yes
 ProtectSystem=strict

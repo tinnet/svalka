@@ -5,7 +5,7 @@ use clap::{Args, Parser, Subcommand};
 use shadow_rs::shadow;
 use std::time::Duration;
 
-use svalka::{check, identify, notify, restore, run, signals, status, sweep};
+use svalka::{check, history, identify, notify, restore, run, signals, status, sweep};
 
 shadow!(build);
 
@@ -22,7 +22,8 @@ struct Cli {
     #[arg(long, global = true, default_value = "/etc/svalka.toml")]
     config: PathBuf,
 
-    /// Where `run` writes state.json; must be on tmpfs. Only tests change it.
+    /// Where `run` writes state.json and the history; must be on tmpfs. Only
+    /// tests change it.
     #[arg(long, global = true, hide = true, default_value = "/run/svalka")]
     state_dir: PathBuf,
 
@@ -36,6 +37,8 @@ enum Command {
     Status(StatusArgs),
     /// Validate the config against the hardware and show each fan's duty right now (read-only)
     Check,
+    /// Show the last 15–30 minutes of each fan's temperature, duty and rpm (read-only)
+    History(HistoryArgs),
     /// Run one fan at 100 % for a few seconds, then restore it (needs root)
     Identify(IdentifyArgs),
     /// Step one fan from 100 % to 0 and back, to find where it stops and starts (needs root)
@@ -55,6 +58,20 @@ struct StatusArgs {
     /// Device path that tells chips with the same name apart, e.g. nct6775.656
     #[arg(long, requires = "chip")]
     path: Option<String>,
+}
+
+#[derive(Args)]
+struct HistoryArgs {
+    /// Only this fan, e.g. exhaust
+    fan: Option<String>,
+
+    /// Only the last part, e.g. 30s, 5m or 1h
+    #[arg(long, value_parser = history::parse_since)]
+    since: Option<Duration>,
+
+    /// Print the ticks as JSON lines, one per tick
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args)]
@@ -115,6 +132,19 @@ fn run_command(cli: &Cli) -> anyhow::Result<()> {
             print!("{}", status::run(&cli.hwmon_root, &filter)?);
         }
         Command::Check => print!("{}", check::run(&cli.config, &cli.hwmon_root)?),
+        Command::History(args) => {
+            let options = history::Options {
+                fan: args.fan.as_deref(),
+                since: args.since,
+                json: args.json,
+            };
+            history::run(
+                &cli.state_dir,
+                &options,
+                run::unix_millis(),
+                &mut std::io::stdout(),
+            )?;
+        }
         Command::Identify(args) => {
             let options = identify::Options {
                 fan: &args.fan,

@@ -46,8 +46,8 @@ outputs fight over them.
 
 ## Commands
 
-`status` and `check` are read-only and need no root; the others write to the
-fans.
+`status`, `check` and `history` are read-only and need no root; the others
+write to the fans.
 
 ### `svalka status`
 
@@ -95,6 +95,36 @@ is checked first, then the hardware: chips must resolve, labels and outputs
 must exist, `AUXTIN*` inputs are refused, and every sensor must read
 0–125 °C. [`examples/svalka.toml`](examples/svalka.toml) documents the
 format.
+
+### `svalka history [FAN]`
+
+The last 15–30 minutes of each fan, from the history `run` keeps in
+`/run/svalka`: a sparkline each for the fan's temperature (its hottest
+source), duty and rpm, with the range and the latest value.
+
+```console
+$ svalka history exhaust
+Last 4 min 59 s, 300 ticks; the newest is 0.6 s old.
+
+exhaust  nct6798 pwm1
+  temp  ▅▅▅▆▆▆▆▇▇▇▅▆▆▆▆▆▆▇▇▇▇▆▅▆▆▆▇▇▇▇▇▇▇▇▇▇▇▇▇▇▃▃▃▂▂▃▃▃▃▃▃▃▃▄▄▄▄▄▄▂  66.0–89.0 °C, now 66.0 °C (gpu)
+  duty  ▁▂▃▄▅▆▆▆▇▇▇▆▆▆▆▆▅▆▇▇▇▇▆▆▆▆▆▇▇▇▇▇▇▇▇▇▇▇▇▇▅▃▂▁▁▁▁▁▁▁▁▂▂▂▂▂▂▂▂▂  55–96 %, now 56 %
+  rpm   ▁▁▃▃▅▅▆▆▆▆▇▇▇▆▆▆▆▆▇▇▇▇▇▆▆▆▆▆▇▇▇▇▇▇▇▇▇▇▇▇▇▆▆▄▄▃▃▃▃▃▃▃▃▃▄▄▄▄▄▄  982–1783 rpm, now 1365 rpm
+```
+
+- Each bar is the highest value in its slice of time, scaled to the range
+  shown beside it, but at least 5 °C, 10 % or 100 rpm, so a steady reading
+  stays a flat line along the bottom.
+- rpm is only read every `readback_interval`; each reading is drawn until the
+  next. A gap of more than two readings, e.g. while svalka was stopped, stays
+  empty.
+- `--since 5m` (or `30s`, `1h`) shows only the recent part; `--json` prints
+  the ticks as JSON lines, one per tick, for scripts and widgets.
+
+`run` appends one line per tick to `/run/svalka/history`; at 900 lines the
+file becomes `history.old` and a new one begins, so 900–1800 ticks are kept,
+under 1 MB with two fans. The files live on tmpfs: they survive
+`systemctl restart` and automatic restarts, but not a stop or a reboot.
 
 ### `sudo svalka identify FAN`
 
@@ -181,6 +211,7 @@ it (`smoothing`), holds small drops (`hysteresis`), applies the curve and
   logs that once and takes it back at the next readback.
 - A fan reading 0 rpm at 30 % or more for about 5 s (at least two readbacks
   in a row) is logged as stalled.
+- Each tick is also appended to the history (see `svalka history`).
 - Ctrl-C and SIGTERM stop it; SIGHUP reloads the config. On exit, and on
   errors, every output goes back to the chip's own SmartFan IV curve
   (`pwmN_enable = 5`).
@@ -238,6 +269,7 @@ crates/svalka-core/     no hardware access
   src/duration.rs           "8s" / "500ms" values
   src/controller.rs         one tick of one fan: smoothing, hysteresis, failsafe
   src/state.rs              the state.json snapshot format
+  src/history.rs            the history format: one JSON line per tick
   src/pwm.rs                percent <-> raw 0-255
 crates/svalka/          the daemon and CLI (library + thin main.rs)
   src/main.rs               command line only
@@ -249,12 +281,14 @@ crates/svalka/          the daemon and CLI (library + thin main.rs)
   src/setup.rs              load config + bind, shared by commands
   src/status.rs             the `status` command
   src/check.rs              the `check` command
+  src/history.rs            the `history` command: sparklines or JSON lines
   src/identify.rs           the `identify` command
   src/sweep.rs              the `sweep` command
   src/run.rs                the `run` command: the control loop
   src/restore.rs            the `restore` command
   src/record.rs             /run/svalka/outputs: what run holds, for restore
   src/statefile.rs          state.json, tmpfs only, atomic writes
+  src/historyfile.rs        /run/svalka/history: appending, rotating, reading
   src/files.rs              atomic write, remove-if-present
   src/log.rs                stderr logging, journald priorities under systemd
   src/notify.rs             sd_notify: READY, STATUS, WATCHDOG, RELOADING
