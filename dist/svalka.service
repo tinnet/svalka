@@ -17,9 +17,9 @@ Restart=on-failure
 RestartSec=2s
 RuntimeDirectory=svalka
 RuntimeDirectoryMode=0755
-# Keep /run/svalka across restarts, so the history survives them. A stop
-# still removes it.
-RuntimeDirectoryPreserve=restart
+# Keep /run/svalka when the service stops, so the history survives stops and
+# restarts. It is on tmpfs, so a reboot still clears it.
+RuntimeDirectoryPreserve=yes
 
 NoNewPrivileges=yes
 ProtectSystem=strict

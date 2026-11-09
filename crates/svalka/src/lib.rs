@@ -10,6 +10,7 @@ pub mod history;
 pub mod historyfile;
 pub mod hwmon;
 pub mod identify;
+pub mod lend;
 pub mod log;
 pub mod notify;
 pub mod record;

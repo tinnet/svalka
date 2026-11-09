@@ -4,9 +4,10 @@
 //! every sensor once, lets each fan's [`FanController`] pick a duty, writes it
 //! when it changed, writes the state snapshot, appends it to the history and
 //! pets systemd's watchdog.
-//! SIGHUP reloads the config. On exit (SIGINT, SIGTERM or an error) every
-//! output goes back to the chip's own automatic mode, so the BIOS curve runs
-//! the fans.
+//! SIGHUP reloads the config. A fan can be lent to `sweep` or `identify`
+//! meanwhile (see [`crate::lend`]). On exit (SIGINT, SIGTERM or an error)
+//! every output goes back to the chip's own automatic mode, so the BIOS curve
+//! runs the fans.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -15,7 +16,7 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, bail};
+use anyhow::{Context, anyhow, bail};
 use svalka_core::controller::{FanController, Tick};
 use svalka_core::history::Line;
 use svalka_core::pwm;
@@ -24,6 +25,7 @@ use svalka_core::state::{FanMode, FanSnapshot, Snapshot, VERSION};
 use crate::binding::{self, BoundOutput, BoundSensor};
 use crate::historyfile::HistoryFile;
 use crate::hwmon::{HandBack, ManualOverride, PwmEnable, PwmState};
+use crate::lend::{self, Request};
 use crate::log;
 use crate::notify::Notifier;
 use crate::record::{self, HeldOutput, OutputRecord};
@@ -95,6 +97,7 @@ struct Daemon<'a> {
     notifier: &'a Notifier,
     state_write_failing: Episode,
     history_write_failing: Episode,
+    loans_failing: Episode,
     /// Appended to systemd's status line, e.g. after a failed reload.
     status_note: Option<&'static str>,
     /// The status line systemd has, so it is only sent when it changes.
@@ -126,6 +129,7 @@ impl<'a> Daemon<'a> {
             notifier,
             state_write_failing: Episode::default(),
             history_write_failing: Episode::default(),
+            loans_failing: Episode::default(),
             status_note: None,
             sent_status: String::new(),
         }
@@ -169,11 +173,14 @@ impl<'a> Daemon<'a> {
     /// One tick, then the state file, the history and systemd's watchdog and
     /// status.
     fn tick_and_publish(&mut self) -> anyhow::Result<()> {
+        self.update_loans()?;
         let sensors = binding::read_sensors(&mut self.sensors);
         let readback = self.readback_due();
         let mut fans = BTreeMap::new();
         for fan in &mut self.fans {
-            fans.insert(fan.name.clone(), fan.tick(&sensors, readback)?);
+            if let Some(snapshot) = fan.tick(&sensors, readback)? {
+                fans.insert(fan.name.clone(), snapshot);
+            }
         }
         let snapshot = Snapshot {
             version: VERSION,
@@ -185,6 +192,35 @@ impl<'a> Daemon<'a> {
         self.append_history(&Line::of(&snapshot, readback));
         self.notifier.watchdog();
         self.publish_status(&snapshot);
+        Ok(())
+    }
+
+    /// Lends fans that a borrower asked for and takes back those whose loan
+    /// ended, then updates the record, so a borrower sees its fan leave the
+    /// record only once it is handed back.
+    fn update_loans(&mut self) -> anyhow::Result<()> {
+        let result = lend::live_requests(self.state_file.dir());
+        match (self.loans_failing.observe(result.is_err()), &result) {
+            (Some(Edge::Began), Err(error)) => {
+                log::error(format!("cannot read the loans: {error}; lending nothing"));
+            }
+            (Some(Edge::Ended), _) => log::info("reading the loans works again"),
+            _ => {}
+        }
+        let requests = result.unwrap_or_default();
+        let mut changed = false;
+        for fan in &mut self.fans {
+            let request = requests.iter().find(|request| request.is_for(&fan.output));
+            match (request, fan.is_lent()) {
+                (Some(request), false) => fan.lend(request),
+                (None, true) => fan.take_back()?,
+                _ => continue,
+            }
+            changed = true;
+        }
+        if changed && let Err(error) = self.write_record(held_outputs(&self.fans)) {
+            log::error(format!("{error:#}"));
+        }
         Ok(())
     }
 
@@ -231,6 +267,14 @@ impl<'a> Daemon<'a> {
     /// systemd notify everything watching the unit.
     fn publish_status(&mut self, snapshot: &Snapshot) {
         let mut status = status_line(snapshot);
+        for fan in &self.fans {
+            if let Some(to) = &fan.lent_to {
+                if !status.is_empty() {
+                    status += ", ";
+                }
+                let _ = write!(status, "{} lent to {to}", fan.name);
+            }
+        }
         if let Some(note) = self.status_note {
             let _ = write!(status, " | {note}");
         }
@@ -273,8 +317,19 @@ impl<'a> Daemon<'a> {
     fn switch_to(&mut self, setup: Setup) -> anyhow::Result<()> {
         // Recorded before any takeover, so `restore` finds every output even if
         // we die halfway; while switching we may hold outputs of both configs.
-        let running = self.fans.iter().map(|fan| &fan.output);
-        self.write_record(running.chain(setup.bindings.outputs.values()))?;
+        // Lent outputs stay out: the borrower holds them, not us.
+        let lent: Vec<BoundOutput> = self
+            .fans
+            .iter()
+            .filter(|fan| fan.is_lent())
+            .map(|fan| fan.output.clone())
+            .collect();
+        let configured = setup
+            .bindings
+            .outputs
+            .values()
+            .filter(|output| !lent.iter().any(|lent| lent.same_output(output)));
+        self.write_record(held_outputs(&self.fans).chain(configured))?;
 
         let mut taken = BTreeMap::new();
         for (name, output) in &setup.bindings.outputs {
@@ -309,8 +364,7 @@ impl<'a> Daemon<'a> {
 
         // Only the new outputs now. If this fails the record lists a few
         // outputs too many, which `restore` handles fine.
-        let held = self.fans.iter().map(|fan| &fan.output);
-        if let Err(error) = self.write_record(held) {
+        if let Err(error) = self.write_record(held_outputs(&self.fans)) {
             log::error(format!("{error:#}"));
         }
         Ok(())
@@ -400,7 +454,10 @@ struct FanLoop {
     output: BoundOutput,
     /// `output.describe()`, kept for the per-tick snapshot and messages.
     description: String,
-    manual: ManualOverride,
+    /// `None` while the output is lent.
+    manual: Option<ManualOverride>,
+    /// Who the output is lent to, e.g. `sweep (pid 4242)`.
+    lent_to: Option<String>,
     controller: FanController,
     /// The raw duty we last wrote.
     written: Option<u8>,
@@ -473,7 +530,8 @@ impl FanLoop {
             name: name.to_owned(),
             description: output.describe(),
             output,
-            manual,
+            manual: Some(manual),
+            lent_to: None,
             controller,
             written: None,
             pwm_enable: None,
@@ -485,8 +543,8 @@ impl FanLoop {
         }
     }
 
-    /// The same output under a reloaded config: keeps the takeover and the duty
-    /// last written, starts everything else afresh.
+    /// The same output under a reloaded config: keeps the takeover (or the
+    /// loan) and the duty last written, starts everything else afresh.
     fn renamed(
         self,
         name: &str,
@@ -495,19 +553,32 @@ impl FanLoop {
         stall_after: u32,
     ) -> Self {
         Self {
-            written: self.written,
-            ..Self::new(name, output, self.manual, controller, stall_after)
+            name: name.to_owned(),
+            description: output.describe(),
+            output,
+            controller,
+            stall: Episode::after(stall_after),
+            pwm_enable: None,
+            rpm: None,
+            failsafe: Episode::default(),
+            interference: Episode::default(),
+            output_errors: Episode::default(),
+            ..self
         }
     }
 
     /// One tick: a duty from the controller, written if it changed. On
     /// `readback` ticks also reads the output and tachometer back.
+    /// A lent fan only keeps its smoothing current and has no snapshot.
     fn tick(
         &mut self,
         sensors: &BTreeMap<String, Option<f64>>,
         readback: bool,
-    ) -> anyhow::Result<FanSnapshot> {
+    ) -> anyhow::Result<Option<FanSnapshot>> {
         let tick = self.controller.tick(sensors);
+        if self.is_lent() {
+            return Ok(None);
+        }
         self.report_failsafe(&tick);
         let raw = pwm::percent_to_raw(tick.duty);
         self.drive_output(raw, readback)?;
@@ -515,7 +586,58 @@ impl FanLoop {
             self.rpm = self.output.read_rpm().ok().flatten();
             self.check_stall(raw);
         }
-        Ok(self.snapshot(&tick, raw))
+        Ok(Some(self.snapshot(&tick, raw)))
+    }
+
+    fn is_lent(&self) -> bool {
+        self.manual.is_none()
+    }
+
+    /// The override, which only a lent fan lacks.
+    fn held(&self) -> anyhow::Result<&ManualOverride> {
+        self.manual
+            .as_ref()
+            .ok_or_else(|| anyhow!("{}: lent, not held", self.label()))
+    }
+
+    /// Hands the output back to the chip and stops writing it, so the
+    /// borrower can take it over.
+    fn lend(&mut self, request: &Request) {
+        let to = format!("{} (pid {})", request.purpose, request.pid);
+        if let Some(manual) = self.manual.take() {
+            match manual.hand_back() {
+                Ok(()) => log::info(format!(
+                    "{}: lent {} to {to}; the chip's own curve runs it until then",
+                    self.name, self.description
+                )),
+                Err(error) => log::error(format!(
+                    "{}: could not hand {} back before lending it to {to}: {error}",
+                    self.name, self.description
+                )),
+            }
+        }
+        self.lent_to = Some(to);
+    }
+
+    /// Takes the output over again after a loan, from whatever state the
+    /// borrower left it in.
+    fn take_back(&mut self) -> anyhow::Result<()> {
+        let manual = self
+            .output
+            .take_over(HandBack::Automatic(self.output.automatic_mode()?))
+            .with_context(|| format!("cannot take back {}", self.label()))?;
+        log::info(format!(
+            "{}: took {} back from {} (was {})",
+            self.name,
+            self.description,
+            self.lent_to.take().unwrap_or_default(),
+            manual.saved()
+        ));
+        self.manual = Some(manual);
+        self.written = None;
+        self.interference = Episode::default();
+        self.output_errors = Episode::default();
+        Ok(())
     }
 
     /// [`FanLoop::write_duty`], tolerating a failing output for up to
@@ -555,11 +677,11 @@ impl FanLoop {
     fn write_duty(&mut self, raw: u8, readback: bool) -> anyhow::Result<bool> {
         let interfered = readback && self.read_back()?;
         if interfered || self.output_errors.is_active() {
-            self.manual
+            self.held()?
                 .reassert(raw)
                 .with_context(|| format!("cannot take back {}", self.label()))?;
         } else if self.written != Some(raw) {
-            self.manual
+            self.held()?
                 .set(raw)
                 .with_context(|| format!("cannot write {}", self.label()))?;
         } else {
@@ -574,7 +696,7 @@ impl FanLoop {
     fn read_back(&mut self) -> anyhow::Result<bool> {
         self.pwm_enable = None;
         let current = self
-            .manual
+            .held()?
             .current()
             .with_context(|| format!("cannot read {}", self.label()))?;
         self.pwm_enable = current.enable;
@@ -686,9 +808,18 @@ fn wait_until(deadline: Instant, signals: &DaemonSignals, notifier: &Notifier) -
     }
 }
 
+/// The outputs of the fans we hold, not those lent.
+fn held_outputs(fans: &[FanLoop]) -> impl Iterator<Item = &BoundOutput> {
+    fans.iter()
+        .filter(|fan| !fan.is_lent())
+        .map(|fan| &fan.output)
+}
+
+/// Hands back every held output. Lent ones are left to their borrower.
 fn hand_back_all(fans: Vec<FanLoop>) {
     for fan in fans {
-        match fan.manual.hand_back() {
+        let Some(manual) = fan.manual else { continue };
+        match manual.hand_back() {
             Ok(()) => log::info(format!(
                 "{}: handed {} back to the chip",
                 fan.name, fan.description
@@ -821,6 +952,38 @@ curve   = [[40, 40], [60, 60]]
             daemon.tick_and_publish().unwrap();
             assert_eq!(pwm2(sysfs), ("128".into(), "1".into()));
             assert!(daemon.fans[0].interference.is_active());
+        });
+    }
+
+    #[test]
+    fn a_fan_is_lent_left_alone_and_taken_back() {
+        with_daemon(|sysfs, daemon| {
+            let state_dir = daemon.state_file.dir().to_path_buf();
+            let me = std::process::id();
+            lend::write_request_for_test(&state_dir, me, &daemon.fans[0].output);
+
+            daemon.tick_and_publish().unwrap();
+            assert_eq!(pwm2(sysfs).1, "5", "handed back to the chip");
+            assert_eq!(fs::read_to_string(daemon.record.path()).unwrap(), "");
+            assert_eq!(
+                daemon.sent_status,
+                format!("cpu_cooler lent to test (pid {me})")
+            );
+
+            // The borrower takes it over; even a readback leaves it alone.
+            let chip = daemon.fans[0].output.chip().clone();
+            chip.write_pwm_enable(2, PwmEnable::Manual).unwrap();
+            chip.write_pwm(2, 200).unwrap();
+            daemon.next_readback = Instant::now();
+            daemon.tick_and_publish().unwrap();
+            assert_eq!(pwm2(sysfs), ("200".into(), "1".into()));
+
+            lend::remove_request_for_test(&state_dir, me);
+            daemon.tick_and_publish().unwrap();
+            assert_eq!(pwm2(sysfs), ("128".into(), "1".into()));
+            let record = fs::read_to_string(daemon.record.path()).unwrap();
+            assert!(record.starts_with("5 2 "), "{record}");
+            assert_eq!(daemon.sent_status, "cpu_cooler 50 % (cpu 50 °C)");
         });
     }
 

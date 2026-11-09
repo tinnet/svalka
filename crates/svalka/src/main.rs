@@ -39,9 +39,9 @@ enum Command {
     Check,
     /// Show the last 15–30 minutes of each fan's temperature, duty and rpm (read-only)
     History(HistoryArgs),
-    /// Run one fan at 100 % for a few seconds, then restore it (needs root)
+    /// Run one fan at 100 % for a few seconds, then restore it; borrows it from `svalka run` if needed (needs root)
     Identify(IdentifyArgs),
-    /// Step one fan from 100 % to 0 and back, to find where it stops and starts (needs root)
+    /// Step one fan from 100 % to 0 and back, to find where it stops and starts; borrows it from `svalka run` if needed (needs root)
     Sweep(SweepArgs),
     /// Control the fans until stopped, then hand them back to the chip (needs root)
     Run,
@@ -150,14 +150,13 @@ fn run_command(cli: &Cli) -> anyhow::Result<()> {
                 fan: &args.fan,
                 seconds: args.seconds,
             };
+            let paths = run::Paths {
+                config: &cli.config,
+                hwmon_root: &cli.hwmon_root,
+                state_dir: &cli.state_dir,
+            };
             let stop = signals::stop_flag()?;
-            identify::run(
-                &cli.config,
-                &cli.hwmon_root,
-                &options,
-                &stop,
-                &mut std::io::stdout(),
-            )?;
+            identify::run(&paths, &options, &stop, &mut std::io::stdout())?;
         }
         Command::Sweep(args) => {
             let paths = run::Paths {

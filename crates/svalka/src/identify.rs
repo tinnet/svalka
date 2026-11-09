@@ -14,6 +14,8 @@ use anyhow::{Context, anyhow, bail};
 
 use crate::binding::BoundOutput;
 use crate::hwmon::{Chip, HandBack, ManualOverride, PwmState};
+use crate::lend;
+use crate::run::Paths;
 use crate::setup::Setup;
 
 /// Full duty.
@@ -58,19 +60,34 @@ enum Hold {
 ///
 /// # Errors
 ///
-/// Fails when the config does not load, the fan is unknown, writing needs
-/// root, the hold is stopped or interfered with, or printing fails. In every
-/// case after the takeover, the output is restored first.
+/// Fails when the config does not load, the fan is unknown, `svalka run`
+/// holds it and does not lend it, writing needs root, the hold is stopped or
+/// interfered with, or printing fails. In every case after the takeover, the
+/// output is restored first; a lent output then goes back to `svalka run`.
 pub fn run(
-    config_path: &std::path::Path,
-    hwmon_root: &std::path::Path,
+    paths: &Paths,
     options: &Options,
     stop: &AtomicBool,
     out: &mut impl Write,
 ) -> anyhow::Result<()> {
-    let setup = Setup::load(config_path, hwmon_root)?;
+    let setup = Setup::load(paths.config, paths.hwmon_root)?;
     let output = find_output(&setup, options.fan)?;
     let chip = output.chip();
+    // Held until the end, after the output is restored below.
+    let loan = lend::borrow(
+        output,
+        paths.state_dir,
+        "identify",
+        lend::wait_for_daemon(setup.config.interval),
+        stop,
+    )?;
+    if loan.from_daemon() {
+        writeln!(
+            out,
+            "svalka run lent {} for the test and takes it back afterwards.",
+            options.fan
+        )?;
+    }
 
     // Speeds before the takeover, printed only once it worked.
     let mut changes = start_rpm_changes(chip)?;

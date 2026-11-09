@@ -306,16 +306,11 @@ fn check_reports_a_missing_config() {
 fn identify_runs_the_fan_and_restores_its_output() {
     let sysfs = FakeSysfs::example_pc();
     let config = sysfs.config(&example_config());
+    let state_dir = tempfile::tempdir().unwrap();
 
     sysfs
-        .svalka(&[
-            "--config",
-            config.to_str().unwrap(),
-            "identify",
-            "cpu_cooler",
-            "--seconds",
-            "1",
-        ])
+        .svalka_with(&config, state_dir.path(), "identify")
+        .args(["cpu_cooler", "--seconds", "1"])
         .assert()
         .success()
         .stdout(predicate::str::contains(
@@ -337,9 +332,11 @@ fn identify_runs_the_fan_and_restores_its_output() {
 fn identify_lists_the_fans_when_the_name_is_unknown() {
     let sysfs = FakeSysfs::example_pc();
     let config = sysfs.config(&example_config());
+    let state_dir = tempfile::tempdir().unwrap();
 
     sysfs
-        .svalka(&["--config", config.to_str().unwrap(), "identify", "intake"])
+        .svalka_with(&config, state_dir.path(), "identify")
+        .arg("intake")
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -355,9 +352,11 @@ fn identify_explains_that_writing_needs_root() {
     let config = sysfs.config(&example_config());
     let pwm1_enable = sysfs.hwmon_root().join("hwmon7/pwm1_enable");
     fs::set_permissions(&pwm1_enable, fs::Permissions::from_mode(0o444)).unwrap();
+    let state_dir = tempfile::tempdir().unwrap();
 
     sysfs
-        .svalka(&["--config", config.to_str().unwrap(), "identify", "exhaust"])
+        .svalka_with(&config, state_dir.path(), "identify")
+        .arg("exhaust")
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -394,7 +393,7 @@ fn sweep_steps_the_fan_and_restores_its_output() {
 }
 
 #[test]
-fn sweep_refuses_a_fan_that_run_is_controlling() {
+fn sweep_gives_up_when_the_holder_does_not_lend_the_fan() {
     let sysfs = FakeSysfs::example_pc();
     let config = sysfs.config(&example_config());
     let state_dir = tempfile::tempdir().unwrap();
@@ -411,10 +410,14 @@ fn sweep_refuses_a_fan_that_run_is_controlling() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "svalka run is controlling nct6798 pwm1. Stop it first",
+            "svalka run did not lend nct6798 pwm1 within 3 s.",
         ));
 
     assert_eq!(nct6798_attribute(&sysfs, "pwm1_enable"), "1");
+    let loans = fs::read_dir(state_dir.path().join("loans"))
+        .unwrap()
+        .count();
+    assert_eq!(loans, 0, "the loan request is withdrawn");
 }
 
 #[test]
@@ -502,6 +505,63 @@ fn run_drives_the_fans_and_hands_them_back_on_sigterm() {
     assert!(
         state_dir.path().join("history").exists(),
         "the history outlives a stop, for the next start"
+    );
+}
+
+#[test]
+fn run_lends_fans_to_sweep_and_identify_and_takes_them_back() {
+    let sysfs = FakeSysfs::example_pc();
+    let config = sysfs.config(&example_config());
+    let state_dir = tempfile::tempdir_in("/dev/shm").unwrap();
+    let state_file = state_dir.path().join("state.json");
+    let child = sysfs
+        .svalka_with(&config, state_dir.path(), "run")
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    wait_for(|| state_file.exists());
+
+    sysfs
+        .svalka_with(&config, state_dir.path(), "sweep")
+        .args(["exhaust", "--step", "50", "--sample-ms", "1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "svalka run lent exhaust for the sweep and takes it back afterwards.",
+        ))
+        .stdout(predicate::str::contains(
+            "Restored nct6798 pwm1 to 85/255, automatic (5).",
+        ));
+    // gpu 47 °C on [[40, 30], [60, 40]] -> 33.5 % -> 85, in manual mode again.
+    wait_for(|| nct6798_attribute(&sysfs, "pwm1_enable") == "1");
+    assert_eq!(nct6798_attribute(&sysfs, "pwm1"), "85");
+
+    sysfs
+        .svalka_with(&config, state_dir.path(), "identify")
+        .args(["cpu_cooler", "--seconds", "1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "svalka run lent cpu_cooler for the test and takes it back afterwards.",
+        ));
+    wait_for(|| nct6798_attribute(&sysfs, "pwm2_enable") == "1");
+    assert_eq!(nct6798_attribute(&sysfs, "pwm2"), "122");
+
+    signal(&child, "TERM");
+    let output = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains("exhaust: lent nct6798 pwm1 to sweep (pid "),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("exhaust: took nct6798 pwm1 back from sweep (pid "),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("cpu_cooler: took nct6798 pwm2 back from identify (pid "),
+        "{stderr}"
     );
 }
 

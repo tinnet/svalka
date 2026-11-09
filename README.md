@@ -123,8 +123,8 @@ exhaust  nct6798 pwm1
 
 `run` appends one line per tick to `/run/svalka/history`; at 900 lines the
 file becomes `history.old` and a new one begins, so 900–1800 ticks are kept,
-under 1 MB with two fans. The files live on tmpfs: they survive
-`systemctl restart` and automatic restarts, but not a stop or a reboot.
+under 1 MB with two fans. The files live on tmpfs: they survive stopping
+and restarting the service, but not a reboot.
 
 ### `sudo svalka identify FAN`
 
@@ -151,7 +151,8 @@ fan1 rose from 931 to 1764 rpm: pwm1 drives the fan that fan1 reports.
 
 The nct6775 driver refreshes readings every 1.5–2 s, hence the pairs. If
 another program writes the output during the test, `identify` stops and
-restores it. Ctrl-C and SIGTERM also restore before exiting.
+restores it. Ctrl-C and SIGTERM also restore before exiting. If `svalka run`
+holds the fan, `identify` borrows it, like `sweep` (see below).
 
 ### `sudo svalka sweep FAN`
 
@@ -187,10 +188,23 @@ Suggested: min_duty = 25 for fan.cpu_cooler, one step above the start duty.
 A fan keeps turning below the duty it needs to start from a standstill, so
 `min_duty` goes above the start duty, not the stop duty.
 
-`svalka run` must be stopped first (`sudo systemctl stop svalka`); `sweep`
-refuses an output that `run` holds. It stops early and restores the output
-if one of the fan's sources reaches 80 °C or cannot be read, if another
-program writes the output, or on Ctrl-C and SIGTERM.
+If `svalka run` holds the fan, `sweep` borrows it (see below), so the service
+can keep running. It stops early and restores the output if one of the fan's
+sources reaches 80 °C or cannot be read, if another program writes the
+output, or on Ctrl-C and SIGTERM.
+
+#### Borrowing a fan from `svalka run`
+
+`sweep` and `identify` need a fan to themselves. When `run` holds it, they
+write a loan request to `/run/svalka/loans/<pid>` and wait until `run` has
+handed the output back to the chip; `run` checks for requests every tick and
+says so in the journal and in `systemctl status`. Its other fans stay under
+control. When the command ends, it restores the output, removes the request,
+and `run` takes the fan back on its next tick. If the command dies instead,
+`run` notices the process is gone and takes the fan back too. Only root can
+write the request, as only root can write to fans. If no `run` takes the
+request within two ticks and a second (an older version, or a stale record
+with no daemon), the command says so and changes nothing.
 
 ### `sudo svalka run`
 
@@ -283,6 +297,7 @@ crates/svalka/          the daemon and CLI (library + thin main.rs)
   src/check.rs              the `check` command
   src/history.rs            the `history` command: sparklines or JSON lines
   src/identify.rs           the `identify` command
+  src/lend.rs               lending a fan from `run` to `sweep` or `identify`
   src/sweep.rs              the `sweep` command
   src/run.rs                the `run` command: the control loop
   src/restore.rs            the `restore` command

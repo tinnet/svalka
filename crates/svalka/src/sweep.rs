@@ -7,7 +7,6 @@
 
 use std::collections::BTreeMap;
 use std::io::{self, Write};
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
@@ -17,7 +16,7 @@ use svalka_core::pwm;
 
 use crate::binding::{BoundOutput, BoundSensor};
 use crate::hwmon::{HandBack, ManualOverride, PwmState};
-use crate::record::OutputRecord;
+use crate::lend;
 use crate::run::Paths;
 use crate::setup::Setup;
 
@@ -76,10 +75,11 @@ enum Interrupt {
 ///
 /// # Errors
 ///
-/// Fails when the config does not load, the fan is unknown, has no
-/// tachometer or is held by `svalka run`, writing needs root, the sweep is
-/// interrupted, or printing fails. In every case after the takeover, the
-/// output is restored first.
+/// Fails when the config does not load, the fan is unknown or has no
+/// tachometer, `svalka run` holds it and does not lend it, writing needs
+/// root, the sweep is interrupted, or printing fails. In every case after the
+/// takeover, the output is restored first; a lent output then goes back to
+/// `svalka run`.
 pub fn run(
     paths: &Paths,
     options: &Options,
@@ -88,13 +88,27 @@ pub fn run(
 ) -> anyhow::Result<()> {
     let mut setup = Setup::load(paths.config, paths.hwmon_root)?;
     let output = find_output(&setup, options.fan)?.clone();
-    refuse_if_held_by_run(&output, paths.state_dir)?;
     if output.read_rpm()?.is_none() {
         bail!(
             "{} has no tachometer fan{}, so sweep cannot see the fan's speed",
             output.describe(),
             output.pwm()
         );
+    }
+    // Held until the end, after the output is restored below.
+    let loan = lend::borrow(
+        &output,
+        paths.state_dir,
+        "sweep",
+        lend::wait_for_daemon(setup.config.interval),
+        stop,
+    )?;
+    if loan.from_daemon() {
+        writeln!(
+            out,
+            "svalka run lent {} for the sweep and takes it back afterwards.",
+            options.fan
+        )?;
     }
     let mut sources = fan_sources(&mut setup, options.fan);
 
@@ -144,27 +158,6 @@ fn find_output<'a>(setup: &'a Setup, fan: &str) -> anyhow::Result<&'a BoundOutpu
             names.join(", ")
         )
     })
-}
-
-/// A running daemon would take the output back within one readback, so the
-/// sweep would only measure the fight between the two.
-fn refuse_if_held_by_run(output: &BoundOutput, state_dir: &Path) -> anyhow::Result<()> {
-    let record = OutputRecord::in_dir(state_dir);
-    let held = record
-        .read()
-        .with_context(|| format!("cannot read {}", record.path().display()))?
-        .unwrap_or_default();
-    if held
-        .iter()
-        .any(|held| held.chip_dir == output.chip().dir() && held.pwm == output.pwm())
-    {
-        bail!(
-            "svalka run is controlling {}. Stop it first (sudo systemctl stop svalka), \
-             and start it again after the sweep.",
-            output.describe()
-        );
-    }
-    Ok(())
 }
 
 /// The fan's sources by name, taken out of `setup`: the sweep watches them.
